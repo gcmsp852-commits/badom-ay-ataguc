@@ -214,6 +214,19 @@
   }
 
   /**
+   * その構造で「実データを持つLQR」の本数。
+   *   埋め草領域（1000の第2領域）と付加領域（1100の第2領域）は実データを持たないので数えない。
+   *   1000 は regionCount=2 だが実データは1本しかない。この違いを取り違えると、
+   *   2領域を前提にした機能（ユーザ暗号化・電子署名・同一データ・連続データ・
+   *   WEBデータID・埋め草領域拡張）が、対象の無いまま管理部だけ立ってしまう。
+   */
+  function dataLqrCount(systemStruBits) {
+    var st = deriveStructure(systemStruBits);
+    if (!st) return 0;
+    return st.lqrToPqr.filter(function (a) { return a && !a.padding && !a.addon; }).length;
+  }
+
+  /**
    * その構造が電子署名を載せられるかを返す。QRツイン・単一QRのどちらも同じ規則。
    *
    *   署名は役割C＝最終LQRに入る。埋草領域・付加領域は実データを持たないので
@@ -527,6 +540,17 @@
     if (plan && dp !== 0) {
       var target = (dp === 1) ? 2 : 1;   // 01=第2LQR / 10=第1LQR
       if (plan.signatureLqr === target) errors.push("R4: 電子署名のLQRを WEBデータID で置き換えることはできません");
+    }
+
+    // ★実データが1本しかない構造（1000）では、2領域を前提にした指定を弾く。
+    //   対象の無いまま管理部だけ立つと、読取側が存在しない相手を探し続ける。
+    if (dataLqrCount(st.bits) < 2) {
+      if (toBits(mgmt.dataCompBits, 3) !== "000") {
+        errors.push(st.label + " は実データが1領域なので dataCompBits は000だけです");
+      }
+      if (mgmt.appEncFlag) errors.push(st.label + " は暗号化する領域を持ちません");
+      if (dp !== 0) errors.push(st.label + " はWEBデータIDを持てません");
+      if ((mgmt.paddingExt || 0) !== 0) errors.push(st.label + " は埋め草領域拡張を使えません");
     }
 
     // sameDataFlag / paddingExt は 0000 と 1001 のみ
@@ -1027,6 +1051,7 @@
     DEFAULT_COLOR_SPEC_2ND: DEFAULT_COLOR_SPEC_2ND,
     COLOR_SPEC_ALL8: COLOR_SPEC_ALL8,
     deriveStructure: deriveStructure,
+    dataLqrCount: dataLqrCount,
     resolveLqrPlan: resolveLqrPlan,
     signatureSupport: signatureSupport,
     DATA_POSITIONS: DATA_POSITIONS,
