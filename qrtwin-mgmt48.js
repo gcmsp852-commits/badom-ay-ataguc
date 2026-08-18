@@ -215,22 +215,33 @@
 
   /**
    * その構造で「実データを持つLQR」の本数。
-   *   埋め草領域（1000の第2領域）と付加領域（1100の第2領域）は実データを持たないので数えない。
-   *   1000 は regionCount=2 だが実データは1本しかない。この違いを取り違えると、
-   *   2領域を前提にした機能（ユーザ暗号化・電子署名・同一データ・連続データ・
-   *   WEBデータID・埋め草領域拡張）が、対象の無いまま管理部だけ立ってしまう。
+   *   1000 の第2領域＝埋草領域は、仕様書のとおり実データを入れる領域なので数える
+   *   （「1000 白黒2色の２領域（埋草領域が第２領域）」）。第2領域の中身は
+   *   第1領域のビット列の終端より後ろ＝一般のQRリーダーには見えない位置に入る。
+   *   数えないのは 1100 の付加領域だけ（値の予約のみで今回は生成しない）。
    */
   function dataLqrCount(systemStruBits) {
     var st = deriveStructure(systemStruBits);
     if (!st) return 0;
-    return st.lqrToPqr.filter(function (a) { return a && !a.padding && !a.addon; }).length;
+    return st.lqrToPqr.filter(function (a) { return a && !a.addon; }).length;
+  }
+
+  /**
+   * 第2領域が「同じシンボルの埋草領域」に入る構造か（1000 だけ）。
+   *   この構造は物理シンボルが1枚しかないので、第2領域だけを対象にした
+   *   シンボル単位の処理（システム暗号化＝型式情報の書き換え）が成り立たない。
+   *   書き換えると第1領域まで読めなくなり、「第1領域は公開」が崩れる。
+   */
+  function secondRegionInPadding(systemStruBits) {
+    var st = deriveStructure(systemStruBits);
+    return !!(st && st.secondRegionIsPadding);
   }
 
   /**
    * その構造が電子署名を載せられるかを返す。QRツイン・単一QRのどちらも同じ規則。
    *
-   *   署名は役割C＝最終LQRに入る。埋草領域・付加領域は実データを持たないので
-   *   本数に数えない（1000 は実データが第1LQRだけなので署名を載せられない）。
+   *   署名は役割C＝最終LQRに入る。1000 は第2領域（埋草領域）が署名の置き場になる。
+   *   数えないのは 1100 の付加領域だけ。
    *
    *   2領域    → dataCompBits 011「公開＋電子署名」。ユーザ暗号化は併用しない。
    *   3領域以上 → 署名を持つのは 111「ケース4」だけで、役割B（第2〜第N-1LQR）が
@@ -246,7 +257,7 @@
       return { ok: false, reason: st.label + " は実装対象外のため電子署名を載せられません" };
     }
     var lqrCount = st.lqrToPqr.filter(function (a) {
-      return a && !a.padding && !a.addon;
+      return a && !a.addon;
     }).length;
     if (lqrCount < 2) {
       return {
@@ -542,8 +553,9 @@
       if (plan.signatureLqr === target) errors.push("R4: 電子署名のLQRを WEBデータID で置き換えることはできません");
     }
 
-    // ★実データが1本しかない構造（1000）では、2領域を前提にした指定を弾く。
-    //   対象の無いまま管理部だけ立つと、読取側が存在しない相手を探し続ける。
+    // ★実データが1本しかない構造（1100の付加領域は未実装）では、
+    //   2領域を前提にした指定を弾く。対象が無いまま管理部だけ立つと、
+    //   読取側が存在しない相手を探し続ける。
     if (dataLqrCount(st.bits) < 2) {
       if (toBits(mgmt.dataCompBits, 3) !== "000") {
         errors.push(st.label + " は実データが1領域なので dataCompBits は000だけです");
@@ -551,6 +563,14 @@
       if (mgmt.appEncFlag) errors.push(st.label + " は暗号化する領域を持ちません");
       if (dp !== 0) errors.push(st.label + " はWEBデータIDを持てません");
       if ((mgmt.paddingExt || 0) !== 0) errors.push(st.label + " は埋め草領域拡張を使えません");
+    }
+
+    // ★1000（第2領域＝同じシンボルの埋草領域）はシステム暗号化を使えない。
+    //   システム暗号化は「第2領域のシンボルの型式情報を書き換える」処理なので、
+    //   シンボルが1枚しかないこの構造では第1領域まで読めなくなる。
+    //   第2領域を隠したいときはユーザ暗号化（埋草に入れるバイト列のXOR）を使う。
+    if (secondRegionInPadding(st.bits) && mgmt.sysEncFlag) {
+      errors.push(st.label + " は第2領域が同じシンボルの埋草領域なので sysEncFlag を使えません");
     }
 
     // sameDataFlag / paddingExt は 0000 と 1001 のみ
@@ -1038,6 +1058,7 @@
     paddingMaskSpec: paddingMaskSpec,
     PADDING_EXT_LENGTH_BITS: PADDING_EXT_LENGTH_BITS,
     PADDING_EXT_MAX_BYTES: PADDING_EXT_MAX_BYTES,
+    secondRegionInPadding: secondRegionInPadding,
     paddingExtHolderLqr: paddingExtHolderLqr,
     paddingExtSourceLqr: paddingExtSourceLqr,
     xorWithMask: xorWithMask,

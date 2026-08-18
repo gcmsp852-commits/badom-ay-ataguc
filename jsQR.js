@@ -564,6 +564,7 @@ function scan(matrix, options) {
                     webDataIdExt32: decoded.webDataIdExt32,
                     paddingExt: decoded.paddingExt,
                     paddingExtBytes: decoded.paddingExtBytes,
+                    monoRegion2Bytes: decoded.monoRegion2Bytes,
                     webDataKind: decoded.webDataKind,
                     imageIdExt32: decoded.imageIdExt32,
                     userIdExt32: decoded.userIdExt32,
@@ -800,6 +801,7 @@ function buildDirectDecodeResult(decoded, matrix) {
         webDataIdExt32: decoded.webDataIdExt32,
         paddingExt: decoded.paddingExt,
         paddingExtBytes: decoded.paddingExtBytes,
+        monoRegion2Bytes: decoded.monoRegion2Bytes,
         webDataKind: decoded.webDataKind,
         imageIdExt32: decoded.imageIdExt32,
         userIdExt32: decoded.userIdExt32,
@@ -2333,6 +2335,22 @@ function decode(data, version) {
                         result.paddingExtBytes = padBytes;
                     } else if (padLen === 0) {
                         result.paddingExtBytes = [];
+                    }
+                }
+                // ★1000（QRコード 白黒）は第2領域そのものが埋草領域に入る。
+                //   仕様書「1000 白黒2色の２領域（埋草領域が第２領域）」。
+                //   書式は埋め草領域拡張と同じ「長さ16ビット＋本体」だが、
+                //   相手のLQRの余りではなく第2領域の中身なので別のキーで返す。
+                //   第2領域が無い個体では、ここは標準の埋め草 0xEC/0x11 なので
+                //   長さが 0xEC11=60433 となり、必ず available() 不足で弾かれる。
+                else if (result.systemStruBits === 8 && stream.available() >= 16) {
+                    var r2Len = stream.readBits(16);
+                    if (r2Len > 0 && stream.available() >= r2Len * 8) {
+                        var r2Bytes = new Array(r2Len);
+                        for (var r2i = 0; r2i < r2Len; r2i++) r2Bytes[r2i] = stream.readBits(8) & 0xFF;
+                        result.monoRegion2Bytes = r2Bytes;
+                    } else if (r2Len === 0) {
+                        result.monoRegion2Bytes = [];
                     }
                 }
             }

@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader14</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -430,6 +430,8 @@
         let firstQR = null;
         let secondQR = null;
         let appMask = null;
+        // ★1000（QRコード 白黒）でユーザ暗号化のとき、パスワード入力待ちの管理部を持つ
+        let monoTwoRegionPending = null;
         let colorScanResult = null;
         let colorScanBBox = null;
         let colorScanAttemptCount = 0;
@@ -2880,6 +2882,8 @@
                 readerIdExt32: res.readerIdExt32,
                 userIdExt32: res.userIdExt32,
                 webDataIdExt32: res.webDataIdExt32,
+                paddingExtBytes: res.paddingExtBytes,
+                monoRegion2Bytes: res.monoRegion2Bytes,
                 dataPosition: res.dataPosition,
                 webDataKind: res.webDataKind,
                 readLimitBits: res.readLimitBits,
@@ -3456,6 +3460,8 @@
                     readerIdExt32: res.readerIdExt32,
                     userIdExt32: res.userIdExt32,
                     webDataIdExt32: res.webDataIdExt32,
+                    paddingExtBytes: res.paddingExtBytes,
+                    monoRegion2Bytes: res.monoRegion2Bytes,
                     dataPosition: res.dataPosition,
                     webDataKind: res.webDataKind,
                     readLimitBits: res.readLimitBits,
@@ -4669,6 +4675,8 @@
                     readerIdExt32: res.readerIdExt32,
                     userIdExt32: res.userIdExt32,
                     webDataIdExt32: res.webDataIdExt32,
+                    paddingExtBytes: res.paddingExtBytes,
+                    monoRegion2Bytes: res.monoRegion2Bytes,
                     dataPosition: res.dataPosition,
                     webDataKind: res.webDataKind,
                     readLimitBits: res.readLimitBits,
@@ -4715,6 +4723,8 @@
                         readerIdExt32: decoded.readerIdExt32,
                         userIdExt32: decoded.userIdExt32,
                         webDataIdExt32: decoded.webDataIdExt32,
+                        paddingExtBytes: decoded.paddingExtBytes,
+                        monoRegion2Bytes: decoded.monoRegion2Bytes,
                         dataPosition: decoded.dataPosition,
                         webDataKind: decoded.webDataKind,
                         readLimitBits: decoded.readLimitBits,
@@ -4812,6 +4822,15 @@
                 appMask = await deriveEncryptionMaskBytesFromInputAsync(combined, 5000);
             } else {
                 appMask = await deriveEncryptionMaskBytesAsync(pw, 5000);
+            }
+
+            // ★1000（第2領域＝埋草領域）は行列の読み直しが要らない。
+            //   埋草から取り出したバイト列をXORで戻すだけなので、その場で完了できる。
+            if (monoTwoRegionPending) {
+                const monoInfo = monoTwoRegionPending;
+                monoTwoRegionPending = null;
+                finishMonoTwoRegion(monoInfo);
+                return;
             }
 
             if (newColorQ1Data && isNewColorMgmtInfo(newColorQ1Data.mgmtInfo)) {
@@ -5135,6 +5154,69 @@
             return { sourceLqr, holderLqr, text: new TextDecoder().decode(bytes) };
         }
 
+        /**
+         * ★1000（QRコード 白黒）の第2領域。
+         *   仕様書「1000 白黒2色の２領域（埋草領域が第２領域）」のとおり、
+         *   第2領域は同じシンボルの埋草領域に「長さ16ビット＋本体」で入っている。
+         *   一般のQRリーダーは第1領域の終端で読み終えるので、そこからは見えない。
+         *     ・ユーザ暗号化 … そのバイト列だけがXORされている（型式情報は素のまま。
+         *       物理シンボルが1枚しかないため、書き換えると第1領域も読めなくなる）
+         *     ・電子署名     … 第2領域そのものが署名文字列（Base64）
+         * @returns {string|null} 第2領域のテキスト（取り出せなければ null）
+         */
+        function decodeMonoRegion2(q, mgmtInfo, mask) {
+            const M = window.QRTwinMgmt48;
+            const raw = q && q.monoRegion2Bytes;
+            if (!raw || !raw.length) return null;
+            let bytes = Uint8Array.from(raw);
+            if (mgmtInfo && mgmtInfo.appEncFlag) {
+                if (!mask || !mask.length) return null;   // パスワード未入力
+                const out = M.xorWithMask(bytes, mask);
+                bytes = (out instanceof Uint8Array) ? out : Uint8Array.from(out);
+            }
+            try { return new TextDecoder().decode(bytes); } catch (e) { return null; }
+        }
+
+        /** 第1QR相当のオブジェクトから48ビット管理部を解く（各所で同じ手順を書かないため） */
+        function mgmtInfoOfQ(q1Like) {
+            if (!q1Like) return null;
+            const mc32 = (q1Like.managementCode32 !== undefined && q1Like.managementCode32 !== null)
+                ? (q1Like.managementCode32 >>> 0)
+                : getManagementCode32FromParts(q1Like.managementCode, q1Like.managementFlags16);
+            if (mc32 === null || mc32 === undefined) return null;
+            return parseStandardMgmt(mc32);
+        }
+
+        /**
+         * ★1000 の読取完了処理。物理QRは1枚だけなので第2QRを探しに行かない。
+         *   第2領域を埋草領域から取り出して、通常どおり結果画面へ渡す。
+         *   電子署名のときの検証入力は「第1領域のテキスト」。生成側も同じものに
+         *   署名している（署名は第1領域のコード語の中に入るので、コード語を
+         *   対象にすると署名が自分自身を含む循環になり作れない）。
+         */
+        function finishMonoTwoRegion(mgmtInfo) {
+            const region2 = decodeMonoRegion2(firstQR, mgmtInfo, appMask);
+            secondQR = {
+                text: region2,
+                managementCode: firstQR ? firstQR.managementCode : null,
+                managementCode32: firstQR ? firstQR.managementCode32 : null,
+                managementFlags16: firstQR ? firstQR.managementFlags16 : null,
+                points: firstQR ? firstQR.points : null,
+                center: firstQR ? firstQR.center : null
+            };
+            getScanDebugStats().q2NotRequiredReason =
+                'singleQr(' + (mgmtInfo ? mgmtInfo.systemStruBitsStr : '1000') + ')';
+            isScanning = false;
+            isProcessing = false;
+            if (isDigitalSignMgmt(mgmtInfo)) {
+                const dsResult = verifyNewColorSignature(
+                    region2, firstQR ? firstQR.text : '', firstQR, null);
+                showResultScreen(dsResult);
+            } else {
+                showResultScreen();
+            }
+        }
+
         // ★Ver3.1：連続データ構成か（1本のデータを複数LQRへ分けて入れている）。
         //   2領域は dataCompBits 001 / 3領域以上は 101。どちらの値も
         //   他方の領域数の範囲には現れないので取り違えない。
@@ -5407,6 +5489,12 @@
 
                 // ★Ver3.1：WEBデータIDの領域は、内容がIDなのでラベルを変えて示す。
                 //   読取ソフト自身は取得までは行わず、IDと種別を提示する。
+                // ★1000（白黒QRコード）は第2領域が同じシンボルの埋草領域にある。
+                //   物理QRは1枚なので「第1QR/第2QR」ではなく領域名で示す。
+                if (isSingleMonoQrMgmt(mgmtInfoOfQ(firstQR))) {
+                    if (label1El && label1El.innerText === '第1QR') label1El.innerText = '第1LQR';
+                    if (label2El && label2El.innerText === '第2QR') label2El.innerText = '第2LQR（埋草領域）';
+                }
                 applyWebDataLabels(firstQR, label1El, label2El);
             }
 
@@ -5430,6 +5518,7 @@
             firstQR = null;
             secondQR = null;
             appMask = null;
+            monoTwoRegionPending = null;
             pendingAppEncFrame = null;
             savedQ2AppEncData = null;
             resetScanDebugStats();
@@ -5472,6 +5561,7 @@
             firstQR = null;
             secondQR = null;
             appMask = null;
+            monoTwoRegionPending = null;
             pendingAppEncFrame = null;
             savedQ2AppEncData = null;
             resetScanDebugStats();
@@ -11244,6 +11334,8 @@
                                         readerIdExt32: item.readerIdExt32,
                                         userIdExt32: item.userIdExt32,
                                         webDataIdExt32: item.webDataIdExt32,
+                                        paddingExtBytes: item.paddingExtBytes,
+                                        monoRegion2Bytes: item.monoRegion2Bytes,
                                         dataPosition: item.dataPosition,
                                         webDataKind: item.webDataKind,
                                         readLimitBits: item.readLimitBits,
@@ -11333,6 +11425,8 @@
                                 readerIdExt32: item.readerIdExt32,
                                 userIdExt32: item.userIdExt32,
                                 webDataIdExt32: item.webDataIdExt32,
+                                paddingExtBytes: item.paddingExtBytes,
+                                monoRegion2Bytes: item.monoRegion2Bytes,
                                 dataPosition: item.dataPosition,
                                 webDataKind: item.webDataKind,
                                 readLimitBits: item.readLimitBits,
@@ -11420,14 +11514,19 @@
                             }
 
                             // ★Ver3.1：単一QR・白黒（1000）は物理QRが1枚しかなく、
-                            //   第2領域も埋草なので第1QRだけで完結する。
+                            //   第2領域も同じシンボルの埋草領域にあるので第1QRだけで完結する。
                             //   ここで抜けないと存在しない第2QRを探し続けてタイムアウトする。
                             if (isSingleMonoQrMgmt(mgmtInfo)) {
-                                secondQR = { text: resultData, managementCode: resultMgmt, points: resultPts, center: computeCenterFromPoints(resultPts) };
-                                getScanDebugStats().q2NotRequiredReason = 'singleQr(' + mgmtInfo.systemStruBitsStr + ')';
-                                isScanning = false;
-                                isProcessing = false;
-                                showResultScreen();
+                                // ユーザ暗号化のときは、埋草領域の中身を戻すのにパスワードが要る
+                                if (mgmtInfo.appEncFlag && !appMask) {
+                                    monoTwoRegionPending = mgmtInfo;
+                                    isScanning = false;
+                                    isProcessing = false;
+                                    showPasswordScreen(resultData,
+                                        '第2領域（埋草領域）の復号用パスワードを入力してください');
+                                    return;
+                                }
+                                finishMonoTwoRegion(mgmtInfo);
                                 return;
                             }
 
@@ -11543,6 +11642,8 @@
                                         readerIdExt32: item.readerIdExt32,
                                         userIdExt32: item.userIdExt32,
                                         webDataIdExt32: item.webDataIdExt32,
+                                        paddingExtBytes: item.paddingExtBytes,
+                                        monoRegion2Bytes: item.monoRegion2Bytes,
                                         dataPosition: item.dataPosition,
                                         webDataKind: item.webDataKind,
                                         readLimitBits: item.readLimitBits,
