@@ -249,7 +249,7 @@
                 <!-- ★WEBデータID：IDから配信物を取ってきて出す枠 -->
                 <div class="qr-data-card" id="webDataCard" style="border-color:#FFB74D; margin-top:12px; display:none;">
                     <label style="color:#FFB74D;" id="webDataCardLabel">WEBデータ</label>
-                    <div class="text" id="webDataStatus" style="font-size:0.9rem;">-</div>
+                    <div class="text" id="webDataStatus" style="font-size:0.9rem; white-space:pre-wrap; text-align:left; word-break:break-all;">-</div>
                     <a id="webDataLink" href="#" target="_blank" rel="noopener"
                        style="display:none; word-break:break-all; color:#4FC3F7; font-size:0.95rem;">-</a>
                     <img id="webDataImage" alt="WEBデータ（静止画像）"
@@ -5313,6 +5313,12 @@
          *   そのまま貼ればよい。
          * =================================================================== */
         const WEB_DATA_BASE_DIR = 'web';
+        // ★読取ソフト自身の隣（相対）を先に見て、無ければ公開先も見る。
+        //   指定フォルダの読取ソフトで試すとき、ファイルだけGitHubへ上げてあっても
+        //   表示できるようにするため。GitHub Pages は Access-Control-Allow-Origin: *
+        //   を返すので、別オリジンからでも取得できる。
+        //   公開先を変えたらここだけ直せばよい。空文字にすれば相対だけになる。
+        const WEB_DATA_REMOTE_BASE = 'https://gcmsp852-commits.github.io/aon-ish-ki/';
         // 種別ごとの拡張子候補。上から順に試して、最初に見つかったものを使う。
         const WEB_DATA_EXTS = {
             1: ['txt'],                                  // 平文(文字列)
@@ -5331,19 +5337,49 @@
         // Blob URL は使い終わったら開放する
         let webDataObjectUrl = null;
 
-        /** 種別とIDから、探す順にURLの候補を並べる */
+        /** いま読取ソフトが置かれている場所（絶対URL） */
+        function webDataLocalBase() {
+            try { return new URL('.', location.href).href; } catch (e) { return './'; }
+        }
+
+        /**
+         * 種別とIDから、探す順にURLの候補を並べる。
+         *   置き場所は「読取ソフトの隣」→「公開先」の順。
+         *   名前は web/<ユーザID>/<個別データID> → web/<データID32> の順。
+         * @returns {object} list（候補）/ bases（探した場所）/ names（探した名前）
+         */
         function buildWebDataCandidates(parts, id32, kindValue, encrypted) {
             const exts = WEB_DATA_EXTS[kindValue] || [];
-            const bases = [];
-            if (parts) bases.push(WEB_DATA_BASE_DIR + '/' + parts.userId + '/' + parts.itemId);
-            if (id32 !== null && id32 !== undefined) bases.push(WEB_DATA_BASE_DIR + '/' + (id32 >>> 0));
-            const out = [];
-            for (const b of bases) {
-                for (const e of exts) {
-                    out.push({ url: b + '.' + e + (encrypted ? '.b64' : ''), ext: e });
+            const names = [];
+            if (parts) names.push(WEB_DATA_BASE_DIR + '/' + parts.userId + '/' + parts.itemId);
+            if (id32 !== null && id32 !== undefined) names.push(WEB_DATA_BASE_DIR + '/' + (id32 >>> 0));
+
+            const local = webDataLocalBase();
+            const bases = [''];                       // '' ＝ 相対（読取ソフトの隣）
+            if (WEB_DATA_REMOTE_BASE && WEB_DATA_REMOTE_BASE !== local) bases.push(WEB_DATA_REMOTE_BASE);
+
+            const list = [];
+            for (const base of bases) {
+                for (const n of names) {
+                    for (const e of exts) {
+                        list.push({ url: base + n + '.' + e + (encrypted ? '.b64' : ''), ext: e });
+                    }
                 }
             }
-            return out;
+            return {
+                list,
+                bases: bases.map(b => b || local),
+                names: names.map(n => n + '.<' + exts.join('|') + '>' + (encrypted ? '.b64' : ''))
+            };
+        }
+
+        /** 見つからなかったときに、どこで何を探したかを示す */
+        function webDataNotFoundText(cands) {
+            return [
+                '見つかりません',
+                '探した場所: ' + cands.bases.join('  と  '),
+                '探した名前: ' + cands.names.join('  /  ')
+            ].join(String.fromCharCode(10));
         }
 
         function resetWebDataCard() {
@@ -5427,7 +5463,8 @@
 
             const spec = M.webDataMaskSpec(info.mgmtInfo, appPasswordText);
             const encrypted = spec.kind !== 'none';
-            const candidates = buildWebDataCandidates(info.parts, info.id32, kindValue, encrypted);
+            const cands = buildWebDataCandidates(info.parts, info.id32, kindValue, encrypted);
+            const candidates = cands.list;
             const label = 'WEBデータ（' + info.kind + '）';
             showWebDataStatus(label, '取得中… ' + candidates[0].url);
 
@@ -5440,13 +5477,13 @@
             if (!encrypted && kindValue >= 3) {
                 const elId = kindValue === 3 ? 'webDataImage' : (kindValue === 4 ? 'webDataVideo' : 'webDataAudio');
                 const hit = await loadWebMediaByCandidates(elId, candidates);
-                showWebDataStatus(label, hit ? hit.url : ('見つかりません（探した名前: ' + candidates.map(c => c.url).join(' / ') + '）'));
+                showWebDataStatus(label, hit ? hit.url : webDataNotFoundText(cands));
                 return;
             }
 
             const got = await fetchWebDataBytes(candidates);
             if (!got) {
-                showWebDataStatus(label, '見つかりません（探した名前: ' + candidates.map(c => c.url).join(' / ') + '）');
+                showWebDataStatus(label, webDataNotFoundText(cands));
                 return;
             }
 
