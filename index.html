@@ -246,19 +246,6 @@
                     <label id="normalResultLabel2" style="color:#29B6F6;">第2QR</label>
                     <div class="text" id="resText2">-</div>
                 </div>
-                <!-- ★WEBデータID：IDから配信物を取ってきて出す枠 -->
-                <div class="qr-data-card" id="webDataCard" style="border-color:#FFB74D; margin-top:12px; display:none;">
-                    <label style="color:#FFB74D;" id="webDataCardLabel">WEBデータ</label>
-                    <div class="text" id="webDataStatus" style="font-size:0.9rem; white-space:pre-wrap; text-align:left; word-break:break-all;">-</div>
-                    <a id="webDataLink" href="#" target="_blank" rel="noopener"
-                       style="display:none; word-break:break-all; color:#4FC3F7; font-size:0.95rem;">-</a>
-                    <img id="webDataImage" alt="WEBデータ（静止画像）"
-                         style="display:none; max-width:100%; max-height:240px; margin-top:8px; border-radius:8px; border:2px solid #555;" />
-                    <video id="webDataVideo" controls playsinline
-                           style="display:none; max-width:100%; max-height:240px; margin-top:8px; border-radius:8px; border:2px solid #555;"></video>
-                    <audio id="webDataAudio" controls
-                           style="display:none; width:100%; margin-top:8px;"></audio>
-                </div>
             </div>
             <!-- 電子署名モード表示 -->
             <div id="digitalSignResultSection" style="display:none;">
@@ -280,6 +267,19 @@
                 <div id="dsImageContainer" style="margin-top:12px; text-align:center; display:none;">
                     <img id="dsImage" style="max-width:100%; max-height:240px; border-radius:8px; border:2px solid #555;" />
                 </div>
+            </div>
+            <!-- ★WEBデータID：IDから配信物を取ってきて出す枠 -->
+            <div class="qr-data-card" id="webDataCard" style="border-color:#FFB74D; margin-top:12px; display:none;">
+                <label style="color:#FFB74D;" id="webDataCardLabel">WEBデータ</label>
+                <div class="text" id="webDataStatus" style="font-size:0.9rem; white-space:pre-wrap; text-align:left; word-break:break-all;">-</div>
+                <a id="webDataLink" href="#" target="_blank" rel="noopener"
+                   style="display:none; word-break:break-all; color:#4FC3F7; font-size:0.95rem;">-</a>
+                <img id="webDataImage" alt="WEBデータ（静止画像）"
+                     style="display:none; max-width:100%; max-height:240px; margin-top:8px; border-radius:8px; border:2px solid #555;" />
+                <video id="webDataVideo" controls playsinline
+                       style="display:none; max-width:100%; max-height:240px; margin-top:8px; border-radius:8px; border:2px solid #555;"></video>
+                <audio id="webDataAudio" controls
+                       style="display:none; width:100%; margin-top:8px;"></audio>
             </div>
             <div id="userIdCard" class="qr-data-card" style="border-color: #BA68C8; margin-top:12px; display:none;">
                 <label style="color:#BA68C8;">ユーザーID</label>
@@ -5280,7 +5280,6 @@
 
         function applyWebDataLabels(q1Like, label1El, label2El) {
             const info = getWebDataInfo(q1Like);
-            resetWebDataCard();
             if (!info) return;
             const el = (info.webLqr === 1) ? label1El : label2El;
             if (el) el.innerText = `第${info.webLqr}LQR データはWEB上（${info.kind}）`;
@@ -5289,7 +5288,17 @@
             renderResultText(textId, info.parts
                 ? `データID ${info.id32}（ユーザID ${info.parts.userId} ＋ 個別データID ${info.parts.itemId}）`
                 : 'データIDが読み取れませんでした');
-            // 中身はWEB上にあるので、IDからURLを組み立てて取りに行く（表示は非同期で差し替える）
+        }
+
+        /**
+         * ★WEBデータの取得と表示を始める。
+         *   通常の結果画面と電子署名の結果画面のどちらからも呼ぶ。
+         *   （枠を通常セクションの中に置いていたころは、署名付きのQRツインで
+         *     セクションごと隠れてしまい、一度も表示されなかった）
+         */
+        function renderWebDataCard(q1Like) {
+            const info = getWebDataInfo(q1Like);
+            if (!info) return;
             resolveWebData(info).catch(() => {});
         }
         /* ===================================================================
@@ -5318,7 +5327,7 @@
         //   表示できるようにするため。GitHub Pages は Access-Control-Allow-Origin: *
         //   を返すので、別オリジンからでも取得できる。
         //   公開先を変えたらここだけ直せばよい。空文字にすれば相対だけになる。
-        const WEB_DATA_REMOTE_BASE = 'https://gcmsp852-commits.github.io/aon-ish-ki/';
+        const WEB_DATA_REMOTE_BASE = 'https://gcmsp852-commits.github.io/badom-ay-ataguc/';
         // 種別ごとの拡張子候補。上から順に試して、最初に見つかったものを使う。
         const WEB_DATA_EXTS = {
             1: ['txt'],                                  // 平文(文字列)
@@ -5358,18 +5367,27 @@
             const bases = [''];                       // '' ＝ 相対（読取ソフトの隣）
             if (WEB_DATA_REMOTE_BASE && WEB_DATA_REMOTE_BASE !== local) bases.push(WEB_DATA_REMOTE_BASE);
 
+            // ★暗号化が指定されていても、置いてあるのが平文のこともある。
+            //   拡張子の後ろに .b64 が付いた形を先に探し、無ければ素の形も探す。
+            //   どちらが見つかったかで復号するかを決めるので、取り違えは起きない。
+            //   （以前は .b64 しか探さず、素のファイルを置くと必ず「見つかりません」だった）
+            const suffixes = encrypted ? ['.b64', ''] : [''];
+
             const list = [];
             for (const base of bases) {
-                for (const n of names) {
-                    for (const e of exts) {
-                        list.push({ url: base + n + '.' + e + (encrypted ? '.b64' : ''), ext: e });
+                for (const sfx of suffixes) {
+                    for (const n of names) {
+                        for (const e of exts) {
+                            list.push({ url: base + n + '.' + e + sfx, ext: e, b64: sfx === '.b64' });
+                        }
                     }
                 }
             }
             return {
                 list,
                 bases: bases.map(b => b || local),
-                names: names.map(n => n + '.<' + exts.join('|') + '>' + (encrypted ? '.b64' : ''))
+                names: names.map(n => n + '.<' + exts.join('|') + '>'
+                    + (encrypted ? '（および 同名＋.b64）' : ''))
             };
         }
 
@@ -5468,13 +5486,16 @@
             const label = 'WEBデータ（' + info.kind + '）';
             showWebDataStatus(label, '取得中… ' + candidates[0].url);
 
+            // ユーザ暗号化でパスワードが分からないときは、暗号化された .b64 は開けない。
+            // 素のファイルなら読めるので、候補から .b64 を外して続ける。
             if (encrypted && spec.kind === 'app' && !appPasswordText) {
-                showWebDataStatus(label, 'ユーザ暗号化されています。パスワードが必要です。');
-                return;
+                for (let i = candidates.length - 1; i >= 0; i--) {
+                    if (candidates[i].b64) candidates.splice(i, 1);
+                }
             }
 
             // 暗号化なしの画像・動画・音声は、要素へ直接読ませる（取得と再生を一度で済ませる）
-            if (!encrypted && kindValue >= 3) {
+            if (!encrypted && kindValue >= 3) {   // 暗号化なしのメディアは要素へ直接読ませる
                 const elId = kindValue === 3 ? 'webDataImage' : (kindValue === 4 ? 'webDataVideo' : 'webDataAudio');
                 const hit = await loadWebMediaByCandidates(elId, candidates);
                 showWebDataStatus(label, hit ? hit.url : webDataNotFoundText(cands));
@@ -5487,13 +5508,15 @@
                 return;
             }
 
-            // 暗号化されていれば、置いてあるのはBase64テキスト。戻してから復号する。
+            // ★見つかったのが .b64 のときだけ復号する。素のファイルはそのまま使う。
             let bytes = got.bytes;
-            if (encrypted) {
+            let decLabel = '';
+            if (got.cand.b64) {
                 const raw = base64TextToBytes(new TextDecoder().decode(bytes));
                 if (!raw) { showWebDataStatus(label, 'Base64として読めませんでした: ' + got.cand.url); return; }
                 const dec = await decryptWebPayload(raw, info.mgmtInfo, appPasswordText);
                 bytes = dec.bytes;
+                decLabel = '（復号して表示）';
             }
 
             if (kindValue === 1) {            // 平文(文字列)
@@ -5521,7 +5544,7 @@
             const elId = kindValue === 3 ? 'webDataImage' : (kindValue === 4 ? 'webDataVideo' : 'webDataAudio');
             const el = document.getElementById(elId);
             if (el) { el.src = webDataObjectUrl; el.style.display = ''; }
-            showWebDataStatus(label, got.cand.url + '（復号して表示）');
+            showWebDataStatus(label, got.cand.url + decLabel);
         }
 
 
@@ -5683,6 +5706,8 @@
                     renderResultText('dsAuthKey', null);
                 }
                 renderCreationDateCard('dsCreationDateCard', 'dsCreationDateTime', firstQR ? firstQR.creationDateTimeExt32 : null);
+                // ★WEBデータIDを持つ領域があれば、署名の結果画面でも中身を出す
+                renderWebDataCard(firstQR);
 
                 // 画像データID → 画像表示（認証できたときだけ）
                 const imgId = digitalSignResult.imageDataId;
@@ -5753,6 +5778,7 @@
                     if (label2El && label2El.innerText === '第2QR') label2El.innerText = '第2LQR（埋草領域）';
                 }
                 applyWebDataLabels(firstQR, label1El, label2El);
+                renderWebDataCard(firstQR);
             }
 
             // ユーザーIDは第1QRの拡張管理部に入る（通常モード・電子署名モード共通）
