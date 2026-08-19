@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader15</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -245,6 +245,19 @@
                 <div class="qr-data-card" id="normalResultCard2" style="border-color: #29B6F6; margin-top:12px;">
                     <label id="normalResultLabel2" style="color:#29B6F6;">第2QR</label>
                     <div class="text" id="resText2">-</div>
+                </div>
+                <!-- ★WEBデータID：IDから配信物を取ってきて出す枠 -->
+                <div class="qr-data-card" id="webDataCard" style="border-color:#FFB74D; margin-top:12px; display:none;">
+                    <label style="color:#FFB74D;" id="webDataCardLabel">WEBデータ</label>
+                    <div class="text" id="webDataStatus" style="font-size:0.9rem;">-</div>
+                    <a id="webDataLink" href="#" target="_blank" rel="noopener"
+                       style="display:none; word-break:break-all; color:#4FC3F7; font-size:0.95rem;">-</a>
+                    <img id="webDataImage" alt="WEBデータ（静止画像）"
+                         style="display:none; max-width:100%; max-height:240px; margin-top:8px; border-radius:8px; border:2px solid #555;" />
+                    <video id="webDataVideo" controls playsinline
+                           style="display:none; max-width:100%; max-height:240px; margin-top:8px; border-radius:8px; border:2px solid #555;"></video>
+                    <audio id="webDataAudio" controls
+                           style="display:none; width:100%; margin-top:8px;"></audio>
                 </div>
             </div>
             <!-- 電子署名モード表示 -->
@@ -432,6 +445,8 @@
         let appMask = null;
         // ★1000（QRコード 白黒）でユーザ暗号化のとき、パスワード入力待ちの管理部を持つ
         let monoTwoRegionPending = null;
+        // ★WEBデータの復号にはマスクではなくパスワード文字列が要る（鍵の伸ばし方が別）ので控えておく
+        let appPasswordText = null;
         let colorScanResult = null;
         let colorScanBBox = null;
         let colorScanAttemptCount = 0;
@@ -3417,7 +3432,8 @@
                         };
                     }
                 }
-                if (!res.data || res.isRaw) { sawRaw = true; return null; }
+                // ★WEBデータIDの領域は本文がWEB上にあるのでデータ部が空。空を理由に捨てない。
+                if ((!res.data && !isWebDataRegion(res)) || res.isRaw) { sawRaw = true; return null; }
                 const mc32 = (res.managementCode32 !== undefined && res.managementCode32 !== null)
                     ? (res.managementCode32 >>> 0)
                     : getManagementCode32FromParts(res.managementCode, res.managementFlags16);
@@ -4799,6 +4815,7 @@
                 alert("パスワードを入力してください");
                 return;
             }
+            appPasswordText = pw;
 
             document.getElementById('passwordScreen').style.display = 'none';
             statusText.innerText = "マスク生成中...";
@@ -5254,6 +5271,8 @@
             return {
                 webLqr,
                 kind: MW.webDataKindLabel(mgmtInfo.webDataKind),
+                kindValue: mgmtInfo.webDataKind,
+                mgmtInfo,
                 id32: (id32 === undefined || id32 === null) ? null : (id32 >>> 0),
                 parts: (id32 === undefined || id32 === null) ? null : MW.parseWebDataId(id32)
             };
@@ -5261,6 +5280,7 @@
 
         function applyWebDataLabels(q1Like, label1El, label2El) {
             const info = getWebDataInfo(q1Like);
+            resetWebDataCard();
             if (!info) return;
             const el = (info.webLqr === 1) ? label1El : label2El;
             if (el) el.innerText = `第${info.webLqr}LQR データはWEB上（${info.kind}）`;
@@ -5269,7 +5289,205 @@
             renderResultText(textId, info.parts
                 ? `データID ${info.id32}（ユーザID ${info.parts.userId} ＋ 個別データID ${info.parts.itemId}）`
                 : 'データIDが読み取れませんでした');
+            // 中身はWEB上にあるので、IDからURLを組み立てて取りに行く（表示は非同期で差し替える）
+            resolveWebData(info).catch(() => {});
         }
+        /* ===================================================================
+         * ★WEBデータID（仕様書 5. データ所在）の取得と表示。
+         *
+         *   シンボルには32ビットのデータID（ユーザID26bit＋個別データID6bit）
+         *   しか入っていない。中身はWEB上に置く決まりなので、読取ソフトが
+         *   IDからURLを組み立てて取りに行き、種別に応じて画面へ出す。
+         *
+         *   置き場所は読取ソフト自身と同じ場所の web/ 配下（相対パス）。
+         *   画像データID（ID1.png〜ID10.png）が既にこの方式なので揃えている。
+         *   同一オリジンなのでCORSの設定は要らない。
+         *
+         *   ファイル名は次の2通りのどちらでもよい（上から順に探す）。
+         *     web/<ユーザID>/<個別データID>.<拡張子>
+         *     web/<データID32>.<拡張子>
+         *
+         *   暗号化が指定されている場合（管理部の sysEncFlag / appEncFlag）は、
+         *   仕様どおり本文がXORされているので、拡張子の後ろに .b64 を付けた
+         *   Base64テキストで置く。生成ソフトの「暗号化して表示」が出す文字列を
+         *   そのまま貼ればよい。
+         * =================================================================== */
+        const WEB_DATA_BASE_DIR = 'web';
+        // 種別ごとの拡張子候補。上から順に試して、最初に見つかったものを使う。
+        const WEB_DATA_EXTS = {
+            1: ['txt'],                                  // 平文(文字列)
+            2: ['txt'],                                  // WEBアドレス
+            3: ['png', 'jpg', 'jpeg', 'webp', 'gif'],    // 静止画像
+            4: ['mp4', 'webm', 'mov'],                   // 動画
+            5: ['mp3', 'm4a', 'aac', 'wav', 'ogg', 'oga', 'webm']   // 音声
+        };
+        const WEB_DATA_MIME = {
+            png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+            webp: 'image/webp', gif: 'image/gif',
+            mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+            mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac',
+            wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg', txt: 'text/plain'
+        };
+        // Blob URL は使い終わったら開放する
+        let webDataObjectUrl = null;
+
+        /** 種別とIDから、探す順にURLの候補を並べる */
+        function buildWebDataCandidates(parts, id32, kindValue, encrypted) {
+            const exts = WEB_DATA_EXTS[kindValue] || [];
+            const bases = [];
+            if (parts) bases.push(WEB_DATA_BASE_DIR + '/' + parts.userId + '/' + parts.itemId);
+            if (id32 !== null && id32 !== undefined) bases.push(WEB_DATA_BASE_DIR + '/' + (id32 >>> 0));
+            const out = [];
+            for (const b of bases) {
+                for (const e of exts) {
+                    out.push({ url: b + '.' + e + (encrypted ? '.b64' : ''), ext: e });
+                }
+            }
+            return out;
+        }
+
+        function resetWebDataCard() {
+            const card = document.getElementById('webDataCard');
+            if (!card) return;
+            card.style.display = 'none';
+            for (const id of ['webDataImage', 'webDataVideo', 'webDataAudio', 'webDataLink']) {
+                const e = document.getElementById(id);
+                if (!e) continue;
+                e.style.display = 'none';
+                if (e.tagName === 'A') { e.href = '#'; e.textContent = '-'; }
+                else { e.removeAttribute('src'); if (e.load) { try { e.load(); } catch (err) {} } }
+            }
+            const st = document.getElementById('webDataStatus');
+            if (st) st.innerText = '-';
+            if (webDataObjectUrl) { URL.revokeObjectURL(webDataObjectUrl); webDataObjectUrl = null; }
+        }
+
+        function showWebDataStatus(label, text) {
+            const card = document.getElementById('webDataCard');
+            const lab = document.getElementById('webDataCardLabel');
+            const st = document.getElementById('webDataStatus');
+            if (card) card.style.display = '';
+            if (lab && label) lab.innerText = label;
+            if (st) st.innerText = text;
+        }
+
+        /** メディア要素に候補URLを順に入れ、読めたところで止める */
+        function loadWebMediaByCandidates(elId, candidates) {
+            return new Promise((resolve) => {
+                const el = document.getElementById(elId);
+                if (!el || !candidates.length) { resolve(null); return; }
+                let i = 0;
+                const tryNext = () => {
+                    if (i >= candidates.length) { el.onerror = null; el.style.display = 'none'; resolve(null); return; }
+                    const cand = candidates[i++];
+                    el.onerror = tryNext;
+                    el.onloadeddata = el.onload = () => { el.onerror = null; resolve(cand); };
+                    el.style.display = '';
+                    el.src = cand.url;
+                    if (el.load) { try { el.load(); } catch (e) {} }
+                };
+                tryNext();
+            });
+        }
+
+        /** 候補URLを順に取得して、最初に見つかったバイト列を返す */
+        async function fetchWebDataBytes(candidates) {
+            for (const cand of candidates) {
+                try {
+                    const res = await fetch(cand.url, { cache: 'no-store' });
+                    if (!res.ok) continue;
+                    const buf = await res.arrayBuffer();
+                    return { cand: cand, bytes: new Uint8Array(buf) };
+                } catch (e) { /* 次の候補へ */ }
+            }
+            return null;
+        }
+
+        /** Base64テキスト（暗号化データの入れ物）をバイト列へ戻す */
+        function base64TextToBytes(text) {
+            const clean = String(text || '').replace(/\s+/g, '');
+            if (!clean) return null;
+            try {
+                const bin = atob(clean);
+                const out = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+                return out;
+            } catch (e) { return null; }
+        }
+
+        /**
+         * WEBデータIDから中身を取ってきて結果画面へ出す。
+         * @param {object} info getWebDataInfo の戻り
+         */
+        async function resolveWebData(info) {
+            const M = window.QRTwinMgmt48;
+            if (!info || !info.parts || !M) return;
+            const kindValue = info.kindValue;
+            if (!WEB_DATA_EXTS[kindValue]) return;   // 種別未定義
+
+            const spec = M.webDataMaskSpec(info.mgmtInfo, appPasswordText);
+            const encrypted = spec.kind !== 'none';
+            const candidates = buildWebDataCandidates(info.parts, info.id32, kindValue, encrypted);
+            const label = 'WEBデータ（' + info.kind + '）';
+            showWebDataStatus(label, '取得中… ' + candidates[0].url);
+
+            if (encrypted && spec.kind === 'app' && !appPasswordText) {
+                showWebDataStatus(label, 'ユーザ暗号化されています。パスワードが必要です。');
+                return;
+            }
+
+            // 暗号化なしの画像・動画・音声は、要素へ直接読ませる（取得と再生を一度で済ませる）
+            if (!encrypted && kindValue >= 3) {
+                const elId = kindValue === 3 ? 'webDataImage' : (kindValue === 4 ? 'webDataVideo' : 'webDataAudio');
+                const hit = await loadWebMediaByCandidates(elId, candidates);
+                showWebDataStatus(label, hit ? hit.url : ('見つかりません（探した名前: ' + candidates.map(c => c.url).join(' / ') + '）'));
+                return;
+            }
+
+            const got = await fetchWebDataBytes(candidates);
+            if (!got) {
+                showWebDataStatus(label, '見つかりません（探した名前: ' + candidates.map(c => c.url).join(' / ') + '）');
+                return;
+            }
+
+            // 暗号化されていれば、置いてあるのはBase64テキスト。戻してから復号する。
+            let bytes = got.bytes;
+            if (encrypted) {
+                const raw = base64TextToBytes(new TextDecoder().decode(bytes));
+                if (!raw) { showWebDataStatus(label, 'Base64として読めませんでした: ' + got.cand.url); return; }
+                const dec = await decryptWebPayload(raw, info.mgmtInfo, appPasswordText);
+                bytes = dec.bytes;
+            }
+
+            if (kindValue === 1) {            // 平文(文字列)
+                showWebDataStatus(label, new TextDecoder().decode(bytes));
+                return;
+            }
+            if (kindValue === 2) {            // WEBアドレス
+                const url = new TextDecoder().decode(bytes).trim().split(/\r?\n/)[0];
+                const a = document.getElementById('webDataLink');
+                showWebDataStatus(label, got.cand.url);
+                if (a && /^https?:\/\//i.test(url)) {
+                    a.href = url; a.textContent = url; a.style.display = '';
+                } else {
+                    showWebDataStatus(label, 'WEBアドレスとして読めませんでした: ' + url);
+                }
+                return;
+            }
+            // 暗号化されていた画像・動画・音声は、復号後のバイト列をBlobにして渡す
+            // .webm は動画にも音声にも使われるので、種別のほうを優先する
+            const mime = (kindValue === 5 && got.cand.ext === 'webm')
+                ? 'audio/webm'
+                : (WEB_DATA_MIME[got.cand.ext] || 'application/octet-stream');
+            if (webDataObjectUrl) URL.revokeObjectURL(webDataObjectUrl);
+            webDataObjectUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+            const elId = kindValue === 3 ? 'webDataImage' : (kindValue === 4 ? 'webDataVideo' : 'webDataAudio');
+            const el = document.getElementById(elId);
+            if (el) { el.src = webDataObjectUrl; el.style.display = ''; }
+            showWebDataStatus(label, got.cand.url + '（復号して表示）');
+        }
+
+
 
         // ★画像データID（32ビット）の取り出し。
         //   jsQR は hasImageId のとき imageIdExt32 へ入れるが、読取側は長らく
@@ -5379,6 +5597,8 @@
             // ★ 通常QR表示で隠した第2QRカードを元に戻す（QRツイン表示では常に必要）
             const card2El = document.getElementById('normalResultCard2');
             if (card2El) card2El.style.display = '';
+            // 前の読取で出したWEBデータが残らないように消してから組み立てる
+            resetWebDataCard();
 
             if (errorMessage) {
                 // ★ エラーメッセージ表示（読取期限切れ・読取端末ID不一致・読取位置不一致・読取回数超過 等）
@@ -5519,6 +5739,8 @@
             secondQR = null;
             appMask = null;
             monoTwoRegionPending = null;
+            appPasswordText = null;
+            resetWebDataCard();
             pendingAppEncFrame = null;
             savedQ2AppEncData = null;
             resetScanDebugStats();
@@ -6235,6 +6457,23 @@
                 if (m32 === null) return wantNo === 0;
                 return ((m32 >>> 30) & 0x3) === wantNo;
             };
+        }
+
+        /**
+         * ★WEBデータIDが指す領域か。
+         *   その領域の中身はWEB上にあるので、シンボルのデータ部は空で正しい
+         *   （生成側も本文を入れない）。本文の有無だけで復号結果を捨てると、
+         *   復号は成功しているのに1件も受理されず、
+         *   「decode_success は出るのに 成功0回」でタイムアウトする。
+         */
+        function isWebDataRegion(qr) {
+            const M = window.QRTwinMgmt48;
+            if (!M || !qr) return false;
+            if (isPlainQrCode(qr)) return false;   // 管理部を持たない通常QRは対象外
+            const mgmtInfo = parseStandardMgmt(getManagementCode32FromQr(qr));
+            if (!mgmtInfo) return false;
+            const webLqr = M.webDataLqrOf(mgmtInfo.dataPosition);
+            return webLqr !== null && webLqr === (mgmtInfo.qrNo + 1);
         }
 
         function getQrNumber(qr) {
@@ -10005,7 +10244,7 @@
                                             const imgData = zxingCtx.getImageData(0, 0, sw, sh);
                                             markJsQrCropRect(sx, sy, sw, sh, 'jsQR BD crop');
                                             const res = jsQR(imgData.data, sw, sh, { inversionAttempts: 'attemptBoth' });
-                                            if (res && res.data && !res.isRaw) {
+                                            if (res && (res.data || isWebDataRegion(res)) && !res.isRaw) {
                                                 const qrNo = getQrNumber(res);
                                                 if (qrNo === 0) {
                                                     q1Found = offsetQrResult(res, sx, sy);
@@ -10028,7 +10267,7 @@
                                 zxingCtx.drawImage(video, 0, 0, vw, vh);
                                 const fullData = zxingCtx.getImageData(0, 0, vw, vh);
                                 const res = jsQR(fullData.data, vw, vh, { inversionAttempts: 'attemptBoth' });
-                                if (res && res.data && !res.isRaw) {
+                                if (res && (res.data || isWebDataRegion(res)) && !res.isRaw) {
                                     const qrNo = getQrNumber(res);
                                     if (qrNo === 0) {
                                         q1Found = res;
@@ -11122,7 +11361,7 @@
 
                         if (resFullList && resFullList.length > 0) {
                             for (let resFull of resFullList) {
-                                if (resFull && resFull.data) {
+                                if (resFull && (resFull.data || isWebDataRegion(resFull))) {
                                     if (scanStage === 1 && resFull.isRaw) continue;
                                     
                                     detectedItems.push({
