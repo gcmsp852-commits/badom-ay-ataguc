@@ -260,13 +260,14 @@
                     <label style="color:#FFD54F;">認証鍵</label>
                     <div class="text" id="dsAuthKey">-</div>
                 </div>
-                <div id="dsCreationDateCard" class="qr-data-card" style="border-color: #81C784; margin-top:12px; display:none;">
-                    <label style="color:#81C784;">QRツイン作成日時</label>
-                    <div class="text" id="dsCreationDateTime">-</div>
-                </div>
                 <div id="dsImageContainer" style="margin-top:12px; text-align:center; display:none;">
                     <img id="dsImage" style="max-width:100%; max-height:240px; border-radius:8px; border:2px solid #555;" />
                 </div>
+            </div>
+            <!-- ★作成日時：電子署名だけでなく、通常のQRツイン・QRコードでも出す -->
+            <div id="dsCreationDateCard" class="qr-data-card" style="border-color: #81C784; margin-top:12px; display:none;">
+                <label style="color:#81C784;" id="creationDateLabel">作成日時</label>
+                <div class="text" id="dsCreationDateTime">-</div>
             </div>
             <!-- ★WEBデータID：IDから配信物を取ってきて出す枠 -->
             <div class="qr-data-card" id="webDataCard" style="border-color:#FFB74D; margin-top:12px; display:none;">
@@ -5705,7 +5706,6 @@
                     if (authCard) authCard.style.display = 'none';
                     renderResultText('dsAuthKey', null);
                 }
-                renderCreationDateCard('dsCreationDateCard', 'dsCreationDateTime', firstQR ? firstQR.creationDateTimeExt32 : null);
                 // ★WEBデータIDを持つ領域があれば、署名の結果画面でも中身を出す
                 renderWebDataCard(firstQR);
 
@@ -5780,6 +5780,20 @@
                 applyWebDataLabels(firstQR, label1El, label2El);
                 renderWebDataCard(firstQR);
             }
+
+            // ★作成日時も第1QRの拡張管理部に入る。電子署名に限らず、
+            //   通常のQRツイン・QRコードでも設定されていれば出す。
+            {
+                const lab = document.getElementById('creationDateLabel');
+                if (lab) {
+                    const st = (window.QRTwinMgmt48 && firstQR)
+                        ? window.QRTwinMgmt48.deriveStructure(
+                            (mgmtInfoOfQ(firstQR) || {}).systemStruBitsStr || '') : null;
+                    lab.innerText = (st && st.isTwin === false) ? 'QRコード作成日時' : 'QRツイン作成日時';
+                }
+            }
+            renderCreationDateCard('dsCreationDateCard', 'dsCreationDateTime',
+                firstQR && firstQR.creationDateTimeExt32 !== undefined ? firstQR.creationDateTimeExt32 : null);
 
             // ユーザーIDは第1QRの拡張管理部に入る（通常モード・電子署名モード共通）
             renderUserIdCard('userIdCard', 'userIdText',
