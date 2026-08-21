@@ -1552,6 +1552,7 @@
             // ★ 新しい試行では BarcodeDetector の間引き状態も初期化し、
             //   最初のフレームから通常QRを取りこぼさないようにする
             bdZeroStreak = 0; bdCallTick = 0; bdSkippedCount = 0;
+            newColorLocateMissStreak = 0;   // カラーの位置特定の空振り回数も初期化
             scanDebugStats = {
                 startedAt: Date.now(),
                 startedPerf: nowPerf(),
@@ -8557,6 +8558,10 @@
         //   パレットはデータセルと同一インク・同一照明・同一ボケなので、実測すれば
         //   印刷やディスプレイの発色差に依らず分類セントロイドを現物合わせできる。
         let newColorPaletteLastReason = '';                 // 直近のパレット棄却理由（calib行の pal=0(...) 表示用）
+        // ★カラーの位置特定が連続で空振りした回数。
+        //   Stage3の BarcodeDetector は「位置を見失ったときの保険」なので、
+        //   位置が取れている間は呼ばない判断に使う（実測でBDは第2QRの取得に一度も寄与していない）。
+        let newColorLocateMissStreak = 0;
         const NEW_COLOR_PALETTE_LAYOUT = [
             { name: 'purple', dr: 0, dc: 0 },
             { name: 'blue',   dr: 0, dc: 6 },
@@ -8565,9 +8570,56 @@
             { name: 'cyan',   dr: 5, dc: 1 },
             { name: 'green',  dr: 5, dc: 5 }
         ];
+        // ★色見本の明るさの並び（暗い順）。カメラの応答は単調なので、
+        //   正しい向きで読めていればこの順序が保たれる。逆向きに読むと
+        //   ファインダーの黒白まで拾って順序が崩れるので、それで向きを見分ける。
+        const NEW_COLOR_PALETTE_LUMA_ORDER = ['blue', 'red', 'purple', 'green', 'cyan', 'yellow'];
+        function newColorPaletteOrderError(out) {
+            const luma = (v) => 0.299 * v[0] + 0.587 * v[1] + 0.114 * v[2];
+            let bad = 0;
+            for (let i = 0; i < NEW_COLOR_PALETTE_LUMA_ORDER.length; i++) {
+                for (let j = i + 1; j < NEW_COLOR_PALETTE_LUMA_ORDER.length; j++) {
+                    const a = out[NEW_COLOR_PALETTE_LUMA_ORDER[i]];
+                    const b = out[NEW_COLOR_PALETTE_LUMA_ORDER[j]];
+                    if (!a || !b) return 99;
+                    if (luma(a) >= luma(b)) bad++;
+                }
+            }
+            return bad;
+        }
+
+        // ★QRツインの第2QRは180°回転して刷られる。色見本の置き直しは回転前の位置で
+        //   行われているため、シンボル自身の向きで読むと6色が入れ替わって見える
+        //   （実測: 紫の位置に黒／青の位置に赤／赤の位置に青／黄と水色が入れ替わり／緑の位置に白）。
+        //   どちらの向きで刷られていても読めるよう、2つの向きで読み、
+        //   明るさの並びが正しいほうを採る。既に印刷したコードもそのまま読める。
         function sampleNewColorPaletteCentroids(cellRgb, hasSample, n) {
             newColorPaletteLastReason = '';
             if (!cellRgb || !n || n < 21) { newColorPaletteLastReason = 'na'; return null; }
+            const cands = [];
+            const reasons = [];
+            for (const rotated of [false, true]) {
+                const r = sampleNewColorPaletteOnce(cellRgb, hasSample, n, rotated);
+                if (r) cands.push({ rotated, out: r, err: newColorPaletteOrderError(r) });
+                else reasons.push((rotated ? 'r:' : '') + (newColorPaletteLastReason || '-'));
+            }
+            if (!cands.length) {
+                newColorPaletteLastReason = reasons.join(',');
+                return null;
+            }
+            cands.sort((a, b) => a.err - b.err);
+            const best = cands[0];
+            // 並びが大きく崩れているものは色見本ではない（旧図版のファインダーそのまま等）
+            if (best.err > 2) {
+                newColorPaletteLastReason = 'order' + best.err;
+                return null;
+            }
+            newColorPaletteLastReason = best.rotated ? 'rot' : '';
+            return best.out;
+        }
+
+        function sampleNewColorPaletteOnce(cellRgb, hasSample, n, rotated) {
+            newColorPaletteLastReason = '';
             const fps = [
                 { r: 0, c: 0 },
                 { r: 0, c: n - 7 },
@@ -8575,35 +8627,52 @@
             ];
             const out = {};
             let sampledColors = 0;
-            const chR = [];
-            const chG = [];
-            const chB = [];
             for (const item of NEW_COLOR_PALETTE_LAYOUT) {
-                chR.length = 0;
-                chG.length = 0;
-                chB.length = 0;
+                const dr = rotated ? (6 - item.dr) : item.dr;
+                const dc = rotated ? (6 - item.dc) : item.dc;
+                const pts = [];
                 for (const fp of fps) {
-                    const idx = (fp.r + item.dr) * n + (fp.c + item.dc);
+                    const idx = (fp.r + dr) * n + (fp.c + dc);
                     if (!hasSample[idx]) continue;
                     const base = idx * 3;
-                    chR.push(cellRgb[base]);
-                    chG.push(cellRgb[base + 1]);
-                    chB.push(cellRgb[base + 2]);
+                    pts.push([cellRgb[base], cellRgb[base + 1], cellRgb[base + 2]]);
                 }
-                if (chR.length < 2) { newColorPaletteLastReason = 'ns:' + item.name.slice(0, 3); return null; } // 1点だけでは汚れ・反射に弱い
-                chR.sort((a, b) => a - b);
-                chG.sort((a, b) => a - b);
-                chB.sort((a, b) => a - b);
-                // 同一色の3FPサンプルは同一インクなので大きくは散らない。散る＝格子が
-                // パレット位置に合っていない（ズレた格子が偶然6色拾う誤採用を弾く）
-                const spread = Math.max(
-                    chR[chR.length - 1] - chR[0],
-                    chG[chG.length - 1] - chG[0],
-                    chB[chB.length - 1] - chB[0]
-                );
-                if (spread > 72) { newColorPaletteLastReason = 'spread:' + item.name.slice(0, 3) + Math.round(spread); return null; }
-                const mid = chR.length >> 1;
-                out[item.name] = [chR[mid], chG[mid], chB[mid]];
+                if (pts.length < 2) { newColorPaletteLastReason = 'ns:' + item.name.slice(0, 3); return null; } // 1点だけでは汚れ・反射に弱い
+                // ★同じ色は3か所のファインダーとも同じインクなので大きくは散らない。
+                //   散る＝格子が色見本の位置に合っていない（ズレた格子が偶然6色拾う誤採用を弾く）。
+                //   ただし1か所が汚れ・反射・付加領域の画像で潰れることは実際にあるので、
+                //   3点のうち最も近い2点が揃っていればそれを採る（多数決）。
+                //   従来は1点でも外れると色見本ごと棄却していた（実機ログの spread: 棄却）。
+                let bestPair = null, bestDist = Infinity;
+                for (let a = 0; a < pts.length; a++) {
+                    for (let b = a + 1; b < pts.length; b++) {
+                        const d = Math.max(
+                            Math.abs(pts[a][0] - pts[b][0]),
+                            Math.abs(pts[a][1] - pts[b][1]),
+                            Math.abs(pts[a][2] - pts[b][2])
+                        );
+                        if (d < bestDist) { bestDist = d; bestPair = [pts[a], pts[b]]; }
+                    }
+                }
+                if (!bestPair || bestDist > 72) {
+                    newColorPaletteLastReason = 'spread:' + item.name.slice(0, 3) + Math.round(bestDist);
+                    return null;
+                }
+                // 揃った2点に加え、その2点の中点に近い残りの点も混ぜて平均する
+                const mid2 = [
+                    (bestPair[0][0] + bestPair[1][0]) / 2,
+                    (bestPair[0][1] + bestPair[1][1]) / 2,
+                    (bestPair[0][2] + bestPair[1][2]) / 2
+                ];
+                const use = pts.filter(p => Math.max(
+                    Math.abs(p[0] - mid2[0]), Math.abs(p[1] - mid2[1]), Math.abs(p[2] - mid2[2])) <= 72);
+                let sR = 0, sG = 0, sB = 0;
+                for (const p of use) { sR += p[0]; sG += p[1]; sB += p[2]; }
+                out[item.name] = [
+                    Math.round(sR / use.length),
+                    Math.round(sG / use.length),
+                    Math.round(sB / use.length)
+                ];
                 sampledColors++;
             }
             if (sampledColors !== NEW_COLOR_PALETTE_LAYOUT.length) return null;
@@ -8835,7 +8904,7 @@
                 calibDebug: candidates.map(name =>
                     name.slice(0, 3) + ':' + centroids[name].map(v => Math.round(v)).join('/')
                 ).join(' ') + ` ancDk=${darkAnchor.count} ancLt=${lightAnchor.count} ancDist=${Math.round(anchorDist)}`
-                    + (palette ? ' pal=1' : (newColorDecoderPlaneCount(decoder) === 3 ? ' pal=0(' + (newColorPaletteLastReason || '-') + ')' : ''))
+                    + (palette ? (' pal=1' + (newColorPaletteLastReason === 'rot' ? '(rot)' : '')) : (newColorDecoderPlaneCount(decoder) === 3 ? ' pal=0(' + (newColorPaletteLastReason || '-') + ')' : ''))
             };
         }
 
@@ -9313,6 +9382,9 @@
                     })
                     .map(item => item.loc);
             }
+            // 位置特定が取れているか（Stage3のBD間引き判断に使う）
+            if (colorLocations.length) newColorLocateMissStreak = 0;
+            else newColorLocateMissStreak++;
 
             // ★ 直近の取得実績がある位置情報を先頭で試す（同一クロップのStage3反復では
             //   1候補目の分類で決まりやすくなり、予算内で本命に確実に到達する）
@@ -9380,6 +9452,26 @@
             const attemptCandidateDecode = (cand) => {
                 const locInfo = cand.locInfo;
                 const colorProbe = cand.colorProbe;
+                // ★白黒シンボル（QRツインの第1PQR）を色シンボルとして分類してしまった候補は、
+                //   どのプレーンも復号できないので即座に捨てる。
+                //   実機ログでは、この候補が毎フレーム全プレーンぶんの復号を空振りしていた。
+                //   黒白しか無いと較正が黒白アンカーだけで組み上がり、曖昧セル0・マージン80超の
+                //   「良い候補」に見えてしまうため、候補の並べ替えでも先頭に来て時間を食う。
+                if (cand.states && cand.states.length) {
+                    const seen = new Set();
+                    for (const row of cand.states) {
+                        for (const st of row) {
+                            seen.add(st);
+                            if (seen.size > 2) break;
+                        }
+                        if (seen.size > 2) break;
+                    }
+                    if (seen.size <= 2 && newColorDecoderPlaneCount(decoder) >= 2) {
+                        colorProbe.regions.mono = 'mono_symbol';
+                        if (colorProbe.summary) recordNewColorColorProbe(colorProbe);
+                        return false;
+                    }
+                }
                 // ★Ver3.1：領域番号とプレーン番号の対応を構造から導く。
                 //   従来は bitIndex = regionNo - 2 の固定式で、
                 //   第1PQRも色を持つ構成では割り当てがずれていた。
@@ -10624,9 +10716,13 @@
                         const ladderHit = await runLadder('Q2', q2Stage3Profile, isNewColorLadder ? {
                             fullScales: newColorScales,
                             rotateFull: false,
-                            // BD detect(約190ms/回)は成功寄与ゼロが続くため 1/4 フレームに間引き
-                            // （位置は幾何クロップ＋locateキャッシュが毎フレーム追従する）
-                            useBarcodeDetector: fullScanFrameIdx % 4 === 0
+                            // ★BD detect は約190〜250ms/回かかる一方、実機ログ15試行では
+                            //   第2QRの取得に一度も寄与していない（成功はすべて幾何クロップ＋
+                            //   locate 経由の matrix-located）。20秒中4.5〜5.3秒を空振りに
+                            //   使っていたので、本来の役目である「位置を見失ったときの保険」に絞る。
+                            //   位置特定が2フレーム続けて空振りしたら呼ぶ。加えて 1/8 フレームは
+                            //   保険として必ず呼び、位置が取れていても取りこぼさないようにする。
+                            useBarcodeDetector: (newColorLocateMissStreak >= 2) || (fullScanFrameIdx % 8 === 0)
                         } : {
                             fullScales: heavyScales,
                             rotateFull: fullScanFrameIdx % 6 === 0
