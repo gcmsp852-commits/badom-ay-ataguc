@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader47</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -3363,6 +3363,7 @@
                 if (target !== 'Q2' || !profile || profile.kind !== 'newcolor') return null;
                 const coordinateOptions = buildNewColorCoordinateOptions(w, h, mapPt, rotTag, debugMeta);
                 if (!coordinateOptions) return null;
+                if (debugMeta && debugMeta.onlyPqrNo) coordinateOptions.onlyPqrNo = debugMeta.onlyPqrNo;
                 const q1Data = profile.newColorQ1Data || newColorQ1Data || buildNewColorQ1DataFromFirstQR(profile.newColorMgmtInfo);
                 const mgmt = q1Data && q1Data.mgmtInfo;
                 if (!q1Data || !mgmt) return null;
@@ -3591,6 +3592,33 @@
                         `stage1-bd-other#${ci + 1}`, 0, phase, 'crop',
                         { cropRect: crop });
                     if (hitS1Bd) return hitS1Bd;
+                }
+            }
+
+            // ★第1PQRも色を持つ構成（4色＋4色 / 4色＋8色 / 8色＋8色）専用の工程。
+            //   第1QRは色分離の前に白黒として読めているので、位置は既に確定している。
+            //   その位置をフル解像度で切り出し、第1PQRだけを色分離する。
+            //   ここを共通のはしごに任せると、第1PQRの色判定が縮小画像
+            //   （実機ログでは1モジュール2.8〜6.8px）に回ってしまい、
+            //   重なり部の菱形セルは1セルの半分しか塗られていないので色味が残らない。
+            //   実際、白↔黄・黒↔赤（どちらも第2ビットだけが違う色）の取り違えばかりで、
+            //   第2領域だけが永久に取れなかった。
+            //   第2PQR側は従来どおり共通の幾何クロップで処理する（白黒＋4色と同じ工程）。
+            if (target === 'Q2' && profile.kind === 'newcolor' && profile.firstQrPoints
+                && newColorNeedsPqr1Separation(profile.newColorMgmtInfo)) {
+                const pqr1Box = estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber, 0);
+                if (pqr1Box) {
+                    recordGeometryCropDebug(pqr1Box, '共通F0b 第1PQRクロップ');
+                    zxingCanvas.width = pqr1Box.sw;
+                    zxingCanvas.height = pqr1Box.sh;
+                    zxingCtx.drawImage(video, pqr1Box.sx, pqr1Box.sy, pqr1Box.sw, pqr1Box.sh,
+                        0, 0, pqr1Box.sw, pqr1Box.sh);
+                    const cd1 = zxingCtx.getImageData(0, 0, pqr1Box.sw, pqr1Box.sh);
+                    markJsQrCropRect(pqr1Box.sx, pqr1Box.sy, pqr1Box.sw, pqr1Box.sh, '共通F0b 第1PQRクロップ');
+                    const hitP1 = tryDecodeNewColor(cd1.data, pqr1Box.sw, pqr1Box.sh,
+                        (x, y) => ({ x: x + pqr1Box.sx, y: y + pqr1Box.sy }), 'pqr1', 0,
+                        '共通F0b 第1PQRクロップ', 'crop', { cropRect: pqr1Box, onlyPqrNo: 1 });
+                    if (hitP1) return hitP1;
                 }
             }
 
@@ -9840,7 +9868,10 @@
             }
             let acc = existingResult;
             let out = null;
+            // ★特定のPQRだけを対象にする（第1PQR専用の切り出しで使う）
+            const onlyPqrNo = coordinateOptions && coordinateOptions.onlyPqrNo;
             for (const t of targets) {
+                if (onlyPqrNo && t.pqrNo !== onlyPqrNo) continue;
                 if (!t.regions || !t.regions.length) continue;
                 // このPQRの領域が既に揃っているなら locate ごと省略する
                 if (acc && t.regions.every(p => hasNewColorRegionAcquired(acc, mgmt, p.regionNo))) continue;
