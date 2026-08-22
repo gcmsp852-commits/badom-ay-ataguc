@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader45</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2147,7 +2147,7 @@
                         ? s.confusionTop.map(x => `${x.pair}:${x.count}`).join(' ')
                         : '-';
                     lines.push(
-                        `  #${idx + 1} loc=${cp.locationIndex}${cp.targetPqrNo ? ' pqr=' + cp.targetPqrNo : ''}${cp.seedFallback ? ' seed=1' : ''} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
+                        `  #${idx + 1} loc=${cp.locationIndex}${cp.targetPqrNo ? ' pqr=' + cp.targetPqrNo : ''}${cp.seedFallback ? ' seed=1' : (cp.seedFromFinders ? ' seed=fp' : '')} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
                         `sample=${cp.supersampleScale ? cp.supersampleScale + 'x(' + fmtNum(cp.moduleSize) + '->' + fmtNum(cp.effectiveModuleSize) + 'px)' : 'native'} ` +
                         `alignFixed=${cp.alignFixed ? 1 : 0} alignD=${cp.alignD !== null && cp.alignD !== undefined ? fmtNum(cp.alignD) : '-'} ` +
                         `amb=${s.ambiguousTotal || 0}/${s.totalCells || '-'}(${fmtNum((s.ambiguousPct || 0) * 100)}%) ` +
@@ -7822,7 +7822,98 @@
         //   mappingFunction はモジュール座標(0..dimension)をピクセルへ写す射影変換で、
         //   jsQR の squareToQuadrilateral と同じ式を使う（モジュール四隅は矩形なので
         //   単位正方形への正規化は 1/dimension の割り算で足りる）。
+        // ★jsQR と同じ射影変換の組み立て。
+        //   単位正方形(0,0)(1,0)(1,1)(0,1) を4点へ写す。
+        function newColorSquareToQuad(p1, p2, p3, p4) {
+            const dx3 = p1.x - p2.x + p3.x - p4.x;
+            const dy3 = p1.y - p2.y + p3.y - p4.y;
+            if (dx3 === 0 && dy3 === 0) {
+                return { a11: p2.x - p1.x, a12: p2.y - p1.y, a13: 0,
+                         a21: p3.x - p2.x, a22: p3.y - p2.y, a23: 0,
+                         a31: p1.x, a32: p1.y, a33: 1 };
+            }
+            const dx1 = p2.x - p3.x, dx2 = p4.x - p3.x;
+            const dy1 = p2.y - p3.y, dy2 = p4.y - p3.y;
+            const den = dx1 * dy2 - dx2 * dy1;
+            if (!den) return null;
+            const a13 = (dx3 * dy2 - dx2 * dy3) / den;
+            const a23 = (dx1 * dy3 - dx3 * dy1) / den;
+            return { a11: p2.x - p1.x + a13 * p2.x, a12: p2.y - p1.y + a13 * p2.y, a13,
+                     a21: p4.x - p1.x + a23 * p4.x, a22: p4.y - p1.y + a23 * p4.y, a23,
+                     a31: p1.x, a32: p1.y, a33: 1 };
+        }
+        function newColorQuadToSquare(p1, p2, p3, p4) {
+            const q = newColorSquareToQuad(p1, p2, p3, p4);
+            if (!q) return null;
+            return {
+                a11: q.a22 * q.a33 - q.a23 * q.a32, a12: q.a13 * q.a32 - q.a12 * q.a33, a13: q.a12 * q.a23 - q.a13 * q.a22,
+                a21: q.a23 * q.a31 - q.a21 * q.a33, a22: q.a11 * q.a33 - q.a13 * q.a31, a23: q.a13 * q.a21 - q.a11 * q.a23,
+                a31: q.a21 * q.a32 - q.a22 * q.a31, a32: q.a12 * q.a31 - q.a11 * q.a32, a33: q.a11 * q.a22 - q.a12 * q.a21
+            };
+        }
+        function newColorMatTimes(a, b) {
+            return {
+                a11: a.a11*b.a11 + a.a21*b.a12 + a.a31*b.a13, a12: a.a12*b.a11 + a.a22*b.a12 + a.a32*b.a13, a13: a.a13*b.a11 + a.a23*b.a12 + a.a33*b.a13,
+                a21: a.a11*b.a21 + a.a21*b.a22 + a.a31*b.a23, a22: a.a12*b.a21 + a.a22*b.a22 + a.a32*b.a23, a23: a.a13*b.a21 + a.a23*b.a22 + a.a33*b.a23,
+                a31: a.a11*b.a31 + a.a21*b.a32 + a.a31*b.a33, a32: a.a12*b.a31 + a.a22*b.a32 + a.a32*b.a33, a33: a.a13*b.a31 + a.a23*b.a32 + a.a33*b.a33
+            };
+        }
+
+        // ★第1QRを読んだときの格子をそのまま作り直す。
+        //   第1PQRも色を持つ構成（4色＋4色 など）では、第2プレーンを読むための位置が要るが、
+        //   カラーの位置特定はこの構成でほぼ空振りする（実機ログ: no_locator 66〜76回）。
+        //   従来はシンボルの四隅だけから写像を組んでいたため、内側ほどズレて
+        //   重なり部の菱形セルの中心を外し、明暗（第1プレーン）は合うのに
+        //   色味（第2プレーン）が潰れていた（実機ログ: 白↔黄・黒↔赤の混同ばかり）。
+        //   jsQR が第1QRの復号に実際に使ったのと同じ4点
+        //   （3つのファインダー中心＋右下の位置合わせパターン）から組み直せば、
+        //   復号できた実績のある格子がそのまま使える。
+        function buildLocInfoFromFinderPatterns(location, versionNumber) {
+            if (!location || !versionNumber) return null;
+            const dimension = 17 + 4 * versionNumber;
+            if (dimension < 21) return null;
+            const fTL = location.topLeftFinderPattern;
+            const fTR = location.topRightFinderPattern;
+            const fBL = location.bottomLeftFinderPattern;
+            if (!fTL || !fTR || !fBL) return null;
+            const align = location.bottomRightAlignmentPattern;
+            const p4 = align || { x: fTR.x + fBL.x - fTL.x, y: fTR.y + fBL.y - fTL.y };
+            const brModule = align ? (dimension - 6.5) : (dimension - 3.5);
+            const qToS = newColorQuadToSquare(
+                { x: 3.5, y: 3.5 }, { x: dimension - 3.5, y: 3.5 },
+                { x: brModule, y: brModule }, { x: 3.5, y: dimension - 3.5 });
+            const sToQ = newColorSquareToQuad(fTL, fTR, p4, fBL);
+            if (!qToS || !sToQ) return null;
+            const t = newColorMatTimes(sToQ, qToS);
+            const mappingFunction = (x, y) => {
+                const den = t.a13 * x + t.a23 * y + t.a33;
+                if (!den) return { x: 0, y: 0 };
+                return { x: (t.a11 * x + t.a21 * y + t.a31) / den,
+                         y: (t.a12 * x + t.a22 * y + t.a32) / den };
+            };
+            const corner = (mx, my) => mappingFunction(mx, my);
+            const side = (Math.hypot(fTR.x - fTL.x, fTR.y - fTL.y) + Math.hypot(fBL.x - fTL.x, fBL.y - fTL.y)) / 2;
+            const moduleSize = side / (dimension - 7);
+            if (!(moduleSize > 0)) return null;
+            return {
+                location: {
+                    topLeftCorner: corner(0, 0), topRightCorner: corner(dimension, 0),
+                    bottomRightCorner: corner(dimension, dimension), bottomLeftCorner: corner(0, dimension),
+                    topLeftFinderPattern: fTL, topRightFinderPattern: fTR,
+                    bottomLeftFinderPattern: fBL, bottomRightAlignmentPattern: align || null
+                },
+                dimension,
+                moduleSize,
+                mappingFunction,
+                probeMeta: { seededFromFirstQr: true, seedFromFinders: true, seedHasAlignment: !!align },
+                inverted: false
+            };
+        }
+
         function buildLocInfoFromKnownCorners(location, versionNumber) {
+            // ファインダー中心と位置合わせパターンが取れているなら、そちらで組む（精度が段違い）
+            const byFinders = buildLocInfoFromFinderPatterns(location, versionNumber);
+            if (byFinders) return byFinders;
             if (!location || !versionNumber) return null;
             const dimension = 17 + 4 * versionNumber;
             if (dimension < 21) return null;
@@ -9407,8 +9498,18 @@
                 );
                 // 画像外を指す種は分類しても白セルばかりで無意味（実測: 841中667〜783が白）
                 if (seed && isLocInfoMostlyInside(seed, width, height)) {
-                    seed.seedFallback = true;   // 常に後回し扱いにする印
-                    colorLocations.push(seed);
+                    if (seed.probeMeta && seed.probeMeta.seedFromFinders) {
+                        // ★ファインダー中心＋位置合わせパターンから組んだ種は、
+                        //   第1QRの復号に実際に使われた格子そのもの。上の但し書きは
+                        //   四隅だけから組んでいた頃の話なので、こちらは先頭で試す。
+                        //   第1PQRを狙う回は locate がほぼ空振りする（実機ログ: no_locator 66〜76回）ため、
+                        //   これが唯一のまともな候補になる。
+                        seed.seedFallback = false;
+                        colorLocations.unshift(seed);
+                    } else {
+                        seed.seedFallback = true;   // 四隅だけの粗い種は常に後回し
+                        colorLocations.push(seed);
+                    }
                 }
             }
 
@@ -9645,6 +9746,7 @@
                     regionCount: q1Data.mgmtInfo.regionCount,
                     targetPqrNo: targetPqrNo || null,
                     seedFallback: !!(locInfo && locInfo.seedFallback),
+                    seedFromFinders: !!(locInfo && locInfo.probeMeta && locInfo.probeMeta.seedFromFinders),
                     planList: targetPlanList,
                     regions: {}
                 };
