@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader49</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -8026,6 +8026,29 @@
         // ★Ver3.1：格子のセル中心が画像内にどれだけ入っているかを見る。
         //   縮小フレームやクロップでは第1QRが画角の外に出ることがあり、
         //   そのまま色分類すると白セルばかり拾って時間だけ使う（実測: 841中667〜783が白）。
+        // ★格子が画像内に入っている割合。どれくらい外れているのかを数値で残すために分離した。
+        function locInfoInsideRatio(locInfo, width, height) {
+            if (!locInfo || !locInfo.mappingFunction || !locInfo.dimension) return 0;
+            const n = locInfo.dimension;
+            let inside = 0, total = 0;
+            for (let r = 0; r < n; r += 4) {
+                for (let c = 0; c < n; c += 4) {
+                    const p = locInfo.mappingFunction(c + 0.5, r + 0.5);
+                    total++;
+                    if (p.x >= 0 && p.y >= 0 && p.x < width && p.y < height) inside++;
+                }
+            }
+            return total > 0 ? (inside / total) : 0;
+        }
+        /** 格子の四隅を「x,y→x,y」の形にする（プローブ表示用） */
+        function locInfoRangeText(locInfo) {
+            if (!locInfo || !locInfo.mappingFunction || !locInfo.dimension) return '-';
+            const n = locInfo.dimension;
+            const a = locInfo.mappingFunction(0, 0);
+            const b = locInfo.mappingFunction(n, n);
+            return Math.round(a.x) + ',' + Math.round(a.y) + '→' + Math.round(b.x) + ',' + Math.round(b.y);
+        }
+
         function isLocInfoMostlyInside(locInfo, width, height, minRatio = 0.9) {
             if (!locInfo || !locInfo.mappingFunction || !locInfo.dimension) return false;
             const n = locInfo.dimension;
@@ -9504,7 +9527,12 @@
                     ? q1Data.version
                     : ((q1Data.version && q1Data.version.versionNumber) || q1Data.versionNumber || null)
             ) : null;
-            const usePqr1SeedOnly = !!(pqr1Seed && isLocInfoMostlyInside(pqr1Seed, width, height));
+            // ★第1PQRの種は「復号済みの第1QRから作った格子」なので、でたらめな候補ではない。
+            //   従来は9割が画像内に入っていないと捨てていたが、そうすると唯一の候補が
+            //   消えて何も試せずに終わる（実機ログ: 種:画像外 が毎フレーム60回）。
+            //   実際に重なっている範囲があるなら使い、割合はプローブに残す。
+            const pqr1SeedRatio = pqr1Seed ? locInfoInsideRatio(pqr1Seed, width, height) : 0;
+            const usePqr1SeedOnly = !!(pqr1Seed && pqr1SeedRatio >= 0.35);
             let colorLocations = [];
             if (usePqr1SeedOnly) {
                 recordJsQrInput('newColor pqr1-seed', locateImageType);
@@ -9569,16 +9597,20 @@
             //     約3倍だった（種25/841 に対し locate 候補8/841）。四隅だけの写像では
             //     アライメントパターンによる歪み補正が効かないためで、先頭に置くと
             //     毎フレーム総当たりして時間予算を食い潰す（成功時の平均が 2.7秒→9.4秒に悪化）。
-            let seedNote = usePqr1SeedOnly ? '種:単独使用' : (aimPqr1 ? '種:未作成' : '種:対象外');
+            let seedNote = usePqr1SeedOnly
+                ? ('種:単独使用 画像内' + Math.round(pqr1SeedRatio * 100) + '%')
+                : (aimPqr1 ? ('種:未作成 画像内' + Math.round(pqr1SeedRatio * 100) + '% 範囲=' + locInfoRangeText(pqr1Seed))
+                           : '種:対象外');
             if (aimPqr1 && !usePqr1SeedOnly) {
                 const seedVer = (typeof q1Data.version === 'number' && q1Data.version > 0)
                     ? q1Data.version
                     : ((q1Data.version && q1Data.version.versionNumber)
                         || q1Data.versionNumber || null);
                 const seed = buildLocInfoFromKnownCorners(q1LocalData.location, seedVer);
+                const ratio = seed ? locInfoInsideRatio(seed, width, height) : 0;
                 seedNote = !seedVer ? ('種:型番なし(' + JSON.stringify(q1Data.version) + ')')
                     : (!seed ? '種:格子を作れず'
-                        : (!isLocInfoMostlyInside(seed, width, height) ? '種:画像外' : '種:採用'));
+                        : ('種:画像内' + Math.round(ratio * 100) + '% 範囲=' + locInfoRangeText(seed)));
                 // 画像外を指す種は分類しても白セルばかりで無意味（実測: 841中667〜783が白）
                 if (seed && isLocInfoMostlyInside(seed, width, height)) {
                     if (seed.probeMeta && seed.probeMeta.seedFromFinders) {
