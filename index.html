@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader48</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1553,6 +1553,7 @@
             //   最初のフレームから通常QRを取りこぼさないようにする
             bdZeroStreak = 0; bdCallTick = 0; bdSkippedCount = 0;
             newColorLocateMissStreak = 0;   // カラーの位置特定の空振り回数も初期化
+            for (const k of Object.keys(newColorNoCandidateStats)) delete newColorNoCandidateStats[k];
             scanDebugStats = {
                 startedAt: Date.now(),
                 startedPerf: nowPerf(),
@@ -1728,7 +1729,20 @@
             if (!Array.isArray(stats.newColorColorProbes)) stats.newColorColorProbes = [];
             stats.newColorColorProbes.push(probe);
             if (stats.newColorColorProbes.length > 24) {
-                stats.newColorColorProbes = stats.newColorColorProbes.slice(-24);
+                // ★従来は単純に直近24件へ切り詰めていたため、1フレームの中で後から走る工程
+                //   （縮小全画面など）の結果に押し出され、先に走る専用クロップの結果が
+                //   ログから消えていた。どの工程で何が起きたか追えるよう、
+                //   「対象PQR × 入力画像の大きさ」ごとに直近を残す。
+                const byKey = new Map();
+                for (const p of stats.newColorColorProbes) {
+                    const k = (p.targetPqrNo || '?') + '/' + (p.imgW || '?') + 'x' + (p.imgH || '?');
+                    if (!byKey.has(k)) byKey.set(k, []);
+                    byKey.get(k).push(p);
+                }
+                const kept = [];
+                const perKey = Math.max(2, Math.floor(24 / Math.max(1, byKey.size)));
+                for (const arr of byKey.values()) kept.push(...arr.slice(-perKey));
+                stats.newColorColorProbes = kept.slice(-24);
             }
         }
 
@@ -2135,6 +2149,15 @@
             lines.push('');
 
             if (Array.isArray(stats.newColorColorProbes) && stats.newColorColorProbes.length) {
+            {
+                const noCand = Object.keys(newColorNoCandidateStats);
+                if (noCand.length) {
+                    lines.push('newColor 色分類に入れなかった回（位置特定も種も無い）');
+                    noCand.sort((a, b) => newColorNoCandidateStats[b] - newColorNoCandidateStats[a])
+                        .forEach(k => lines.push('  ' + k + ': ' + newColorNoCandidateStats[k] + '回'));
+                    lines.push('');
+                }
+            }
                 lines.push('newColor color-classify probe');
                 stats.newColorColorProbes.slice(-8).forEach((cp, idx) => {
                     const s = cp.summary || {};
@@ -2147,7 +2170,7 @@
                         ? s.confusionTop.map(x => `${x.pair}:${x.count}`).join(' ')
                         : '-';
                     lines.push(
-                        `  #${idx + 1} loc=${cp.locationIndex}${cp.targetPqrNo ? ' pqr=' + cp.targetPqrNo : ''}${cp.seedFallback ? ' seed=1' : (cp.seedFromFinders ? ' seed=fp' : '')} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
+                        `  #${idx + 1} loc=${cp.locationIndex}${cp.targetPqrNo ? ' pqr=' + cp.targetPqrNo : ''}${cp.imgW ? ' img=' + cp.imgW + 'x' + cp.imgH : ''}${cp.seedFallback ? ' seed=1' : (cp.seedFromFinders ? ' seed=fp' : '')} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
                         `sample=${cp.supersampleScale ? cp.supersampleScale + 'x(' + fmtNum(cp.moduleSize) + '->' + fmtNum(cp.effectiveModuleSize) + 'px)' : 'native'} ` +
                         `alignFixed=${cp.alignFixed ? 1 : 0} alignD=${cp.alignD !== null && cp.alignD !== undefined ? fmtNum(cp.alignD) : '-'} ` +
                         `amb=${s.ambiguousTotal || 0}/${s.totalCells || '-'}(${fmtNum((s.ambiguousPct || 0) * 100)}%) ` +
@@ -8677,6 +8700,13 @@
         //   パレットはデータセルと同一インク・同一照明・同一ボケなので、実測すれば
         //   印刷やディスプレイの発色差に依らず分類セントロイドを現物合わせできる。
         let newColorPaletteLastReason = '';                 // 直近のパレット棄却理由（calib行の pal=0(...) 表示用）
+        // ★カラー分離が「1枚も色分類できずに終わった」回を理由別に数える。
+        //   位置特定も種も無いと、その画像では何も試さずに戻るため、
+        //   従来はログに痕跡が残らず、どの画像で何が起きたのか追えなかった。
+        const newColorNoCandidateStats = Object.create(null);
+        function recordNewColorNoCandidate(key) {
+            newColorNoCandidateStats[key] = (newColorNoCandidateStats[key] || 0) + 1;
+        }
         // ★カラーの位置特定が連続で空振りした回数。
         //   Stage3の BarcodeDetector は「位置を見失ったときの保険」なので、
         //   位置が取れている間は呼ばない判断に使う（実測でBDは第2QRの取得に一度も寄与していない）。
@@ -9461,8 +9491,26 @@
             for (const plan of targetPlanList) {
                 if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, plan.regionNo)) acquiredBefore++;
             }
+            // ★第1PQRを狙う回は、位置探索そのものが不要。
+            //   第1QRは色分離の前に白黒として復号できており、jsQR がそのとき使った
+            //   格子（ファインダー中心3つ＋位置合わせパターン）がそのまま第1PQRの格子になる。
+            //   実機ログでは、この回の位置探索は毎回空振り（no_locator）しながら
+            //   1試行あたり3.4〜5.9秒を使い、そのうえ候補が1件も残らないため
+            //   専用クロップで何も分類できずに終わっていた。
+            //   探索をやめて第1QRの格子を直接使えば、確実に・速く分類できる。
+            const pqr1Seed = aimPqr1 ? buildLocInfoFromKnownCorners(
+                q1LocalData.location,
+                (typeof q1Data.version === 'number' && q1Data.version > 0)
+                    ? q1Data.version
+                    : ((q1Data.version && q1Data.version.versionNumber) || q1Data.versionNumber || null)
+            ) : null;
+            const usePqr1SeedOnly = !!(pqr1Seed && isLocInfoMostlyInside(pqr1Seed, width, height));
             let colorLocations = [];
-            if (skipLocate) {
+            if (usePqr1SeedOnly) {
+                recordJsQrInput('newColor pqr1-seed', locateImageType);
+                pqr1Seed.seedFallback = false;
+                colorLocations = [pqr1Seed];
+            } else if (skipLocate) {
                 recordJsQrInput('newColor locate-skip', locateImageType);
             } else {
                 recordJsQrInput('newColor color-locate', locateImageType);
@@ -9502,8 +9550,10 @@
                     .map(item => item.loc);
             }
             // 位置特定が取れているか（Stage3のBD間引き判断に使う）
-            if (colorLocations.length) newColorLocateMissStreak = 0;
-            else newColorLocateMissStreak++;
+            if (!usePqr1SeedOnly) {
+                if (colorLocations.length) newColorLocateMissStreak = 0;
+                else newColorLocateMissStreak++;
+            }
 
             // ★ 直近の取得実績がある位置情報を先頭で試す（同一クロップのStage3反復では
             //   1候補目の分類で決まりやすくなり、予算内で本命に確実に到達する）
@@ -9519,11 +9569,16 @@
             //     約3倍だった（種25/841 に対し locate 候補8/841）。四隅だけの写像では
             //     アライメントパターンによる歪み補正が効かないためで、先頭に置くと
             //     毎フレーム総当たりして時間予算を食い潰す（成功時の平均が 2.7秒→9.4秒に悪化）。
-            if (aimPqr1) {
-                const seed = buildLocInfoFromKnownCorners(
-                    q1LocalData.location,
-                    q1Data.version || q1Data.versionNumber || null
-                );
+            let seedNote = usePqr1SeedOnly ? '種:単独使用' : (aimPqr1 ? '種:未作成' : '種:対象外');
+            if (aimPqr1 && !usePqr1SeedOnly) {
+                const seedVer = (typeof q1Data.version === 'number' && q1Data.version > 0)
+                    ? q1Data.version
+                    : ((q1Data.version && q1Data.version.versionNumber)
+                        || q1Data.versionNumber || null);
+                const seed = buildLocInfoFromKnownCorners(q1LocalData.location, seedVer);
+                seedNote = !seedVer ? ('種:型番なし(' + JSON.stringify(q1Data.version) + ')')
+                    : (!seed ? '種:格子を作れず'
+                        : (!isLocInfoMostlyInside(seed, width, height) ? '種:画像外' : '種:採用'));
                 // 画像外を指す種は分類しても白セルばかりで無意味（実測: 841中667〜783が白）
                 if (seed && isLocInfoMostlyInside(seed, width, height)) {
                     if (seed.probeMeta && seed.probeMeta.seedFromFinders) {
@@ -9539,6 +9594,11 @@
                         colorLocations.push(seed);
                     }
                 }
+            }
+
+            if (!colorLocations.length) {
+                recordNewColorNoCandidate('pqr' + (targetPqrNo || '?') + ' ' + width + 'x' + height
+                    + ' 位置特定0件 / ' + seedNote);
             }
 
             const regionDecodeOptions = (regionNo, locInfo) => {
@@ -9773,6 +9833,10 @@
                     moduleSize: locInfo && locInfo.moduleSize,
                     regionCount: q1Data.mgmtInfo.regionCount,
                     targetPqrNo: targetPqrNo || null,
+                    // ★どの工程の画像で分類したのかを見分けるために入力の大きさを残す。
+                    //   これが無いと、専用クロップと縮小全画面のどちらの結果か判別できない。
+                    imgW: width,
+                    imgH: height,
                     seedFallback: !!(locInfo && locInfo.seedFallback),
                     seedFromFinders: !!(locInfo && locInfo.probeMeta && locInfo.probeMeta.seedFromFinders),
                     planList: targetPlanList,
