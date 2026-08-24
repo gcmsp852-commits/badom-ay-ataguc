@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader50</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2934,6 +2934,10 @@
                 codewords: res.codewords,
                 dataBytes: res.dataBytes,
                 versionNumber: res.versionNumber,
+                // ★ビデオ座標へ写した location も持たせる。
+                //   四隅だけでなくファインダー中心と位置合わせパターンも入るので、
+                //   第1PQRの色分離が第1QRと同じ精度の格子を使える。
+                location: mapLocationToVideo(L, mapPt),
                 points: [
                     mapPt(L.topLeftCorner.x, L.topLeftCorner.y),
                     mapPt(L.topRightCorner.x, L.topRightCorner.y),
@@ -3452,7 +3456,7 @@
                                 formatInfo: res.formatInfo
                             },
                             codewords: res.correctedCodewords || res.codewords || null,
-                            location: res.location,
+                            location: mapLocationToVideo(res.location, mapPt),
                             points: pts,
                             center: computeCenterFromPoints(pts)
                         };
@@ -3514,7 +3518,7 @@
                     codewords: res.codewords,
                     dataBytes: res.dataBytes,
                     versionNumber: res.versionNumber,
-                    location: res.location,
+                    location: mapLocationToVideo(res.location, mapPt),
                     points: pts,
                     center: computeCenterFromPoints(pts)
                 };
@@ -6677,6 +6681,28 @@
                     bottomLeftFinderPattern: movePoint(qr.location.bottomLeftFinderPattern),
                     bottomRightAlignmentPattern: movePoint(qr.location.bottomRightAlignmentPattern)
                 }
+            };
+        }
+
+        // ★jsQR が返す location は「復号した画像の座標系」のまま。
+        //   縮小画像やクロップで復号した場合、そのままではビデオ座標と一致しない。
+        //   points は mapPt で写しているのに location は写していなかったため、
+        //   第1QRの格子を使う処理（第1PQRの色分離）が
+        //   「縮小率だけ掛かってクロップの原点は引かれていない」座標になり、
+        //   実測では ビデオ座標×0.375−38 という二重変換になっていた。
+        function mapLocationToVideo(location, mapPt) {
+            if (!location || typeof mapPt !== 'function') return location || null;
+            const mv = (p) => (p ? mapPt(p.x, p.y) : p);
+            return {
+                ...location,
+                topLeftCorner: mv(location.topLeftCorner),
+                topRightCorner: mv(location.topRightCorner),
+                bottomRightCorner: mv(location.bottomRightCorner),
+                bottomLeftCorner: mv(location.bottomLeftCorner),
+                topLeftFinderPattern: mv(location.topLeftFinderPattern),
+                topRightFinderPattern: mv(location.topRightFinderPattern),
+                bottomLeftFinderPattern: mv(location.bottomLeftFinderPattern),
+                bottomRightAlignmentPattern: mv(location.bottomRightAlignmentPattern)
             };
         }
 
