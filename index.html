@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader55</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2179,6 +2179,10 @@
                         `alignFixed=${cp.alignFixed ? 1 : 0} alignD=${cp.alignD !== null && cp.alignD !== undefined ? fmtNum(cp.alignD) : '-'} ` +
                         (cp.gridFit ? `grid=${Math.round(cp.gridFit.base)}` +
                             (cp.gridFit.searched ? `>${Math.round(cp.gridFit.dist)}@${cp.gridFit.dx},${cp.gridFit.dy}` : '') +
+                            // ★採用した格子の黒白アンカー実測値。正しい格子なら黒は最暗・白は最明に寄る。
+                            //   もう一方のシンボルの格子に乗ると両方とも中間調になるので、ここで見分けられる。
+                            ((cp.gridFit.dx || cp.gridFit.dy) && cp.gridFit.dk && cp.gridFit.lt
+                                ? `(黒${cp.gridFit.dk.map(Math.round).join('/')} 白${cp.gridFit.lt.map(Math.round).join('/')})` : '') +
                             (cp.gridRejected ? '(棄却)' : '') + ' ' : '') +
                         `amb=${s.ambiguousTotal || 0}/${s.totalCells || '-'}(${fmtNum((s.ambiguousPct || 0) * 100)}%) ` +
                         `minMargin=${s.minMargin !== null && s.minMargin !== undefined ? fmtNum(s.minMargin) : '-'} avgMargin=${s.avgMargin !== null && s.avgMargin !== undefined ? fmtNum(s.avgMargin) : '-'} ` +
@@ -9303,10 +9307,11 @@
             };
             const dk = med(anchors.darkIdx);
             const lt = med(anchors.lightIdx);
-            if (!dk || !lt) return 0;
+            if (!dk || !lt) return { dist: 0, dk: null, lt: null };
             const luma = (a) => 0.299 * a[0] + 0.587 * a[1] + 0.114 * a[2];
-            if (luma(dk) >= luma(lt)) return 0;   // 明暗が逆転している格子は論外
-            return Math.hypot(lt[0] - dk[0], lt[1] - dk[1], lt[2] - dk[2]);
+            // 明暗が逆転している格子は論外
+            if (luma(dk) >= luma(lt)) return { dist: 0, dk, lt };
+            return { dist: Math.hypot(lt[0] - dk[0], lt[1] - dk[1], lt[2] - dk[2]), dk, lt };
         }
 
         // ★サブモジュールのずれを、上の物差しを最大化する向きに直す。
@@ -9314,23 +9319,30 @@
         //   ずれないが、第1PQRは第1QRの location から組むしかなく、そこがずれると
         //   誰も気づけないまま彩度だけで決まるプレーンが全滅する。
         function fitNewColorGridOffset(src, width, height, locationInfo, n, radius) {
-            const base = measureNewColorAnchorSeparation(src, width, height, locationInfo, n, radius, 0, 0);
-            const out = { dx: 0, dy: 0, dist: base, base, searched: 0 };
+            const m0 = measureNewColorAnchorSeparation(src, width, height, locationInfo, n, radius, 0, 0);
+            const base = m0.dist;
+            const out = { dx: 0, dy: 0, dist: base, base, searched: 0, dk: m0.dk, lt: m0.lt };
             // ★アンカーが十分離れていても、さらに離れる向きがあれば必ずそちらが正しい。
             //   合成実測: 0.25モジュールずれは base=229 と一見良好だが曖昧セルは 344/841。
             //   補正すると 5/841 まで落ちるので、良好に見える回も細かく詰める。
-            const STEPS = (base >= NEW_COLOR_CALIB_MIN_ANCHOR_DIST)
-                ? [0, -0.25, 0.25, -0.125, 0.125]
-                : [0, -0.25, 0.25, -0.5, 0.5];
+            // ★±0.5は探さない。QRツインの2枚は 8.5モジュール（＝半モジュール）ずれて刷られるので、
+            //   ちょうど半モジュール動かすと「もう一方のシンボルの格子」に乗ってしまう。
+            //   そこでも機能パターンが部分的に噛み合うため、分離度だけ見ると偽の極大になる。
+            //   実測（4色×4色, 試行#3）: @0.5,-0.5 で dist=174 まで上がったのに、
+            //   較正結果は bla:159/72/47 / red:42/28/24 と黒と赤が入れ替わり、
+            //   曖昧セルは 573/1369(41.9%) へ悪化していた。
+            const STEPS = [0, -0.25, 0.25, -0.125, 0.125];
             for (const dy of STEPS) {
                 for (const dx of STEPS) {
                     if (dx === 0 && dy === 0) continue;
                     out.searched++;
-                    const d = measureNewColorAnchorSeparation(src, width, height, locationInfo, n, radius, dx, dy);
-                    if (d > out.dist) {
-                        out.dist = d;
+                    const m = measureNewColorAnchorSeparation(src, width, height, locationInfo, n, radius, dx, dy);
+                    if (m.dist > out.dist) {
+                        out.dist = m.dist;
                         out.dx = dx;
                         out.dy = dy;
+                        out.dk = m.dk;
+                        out.lt = m.lt;
                     }
                 }
             }
