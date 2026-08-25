@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader57</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2154,6 +2154,14 @@
 
             if (Array.isArray(stats.newColorColorProbes) && stats.newColorColorProbes.length) {
             {
+                if (newColorQ1RefreshStats.tried) {
+                    const s = newColorQ1RefreshStats;
+                    lines.push('第1PQRの位置を毎フレーム取り直した回数: 試行' + s.tried
+                        + '回 / 成功' + s.ok + '回 / 取り直せず' + s.failed + '回'
+                        + ' / 最初の位置からの最大ずれ ' + Math.round(s.maxDriftPx) + 'px('
+                        + s.maxDriftModules.toFixed(1) + 'モジュール)');
+                    lines.push('');
+                }
                 const noCand = Object.keys(newColorNoCandidateStats);
                 if (noCand.length) {
                     lines.push('newColor 色分類に入れなかった回（位置特定も種も無い）');
@@ -4553,6 +4561,73 @@
         function getFirstQrGeometryForQ2() {
             if (!firstQR) return null;
             return firstQR.points || firstQR.q2SeedPoints || null;
+        }
+
+        // ★第1PQRの格子を毎フレーム取り直す。
+        //   第1QRは1度復号したきりで、その位置を20秒間ずっと使い回していた。
+        //   第2PQRは毎フレーム実画像のファインダーを探し直す（fpRank/alignFixed=1 が付く）ので
+        //   手ぶれに追従するが、第1PQRだけが最初のフレームの位置に固定される。
+        //   実測（4色×4色 試行#3）: BarcodeDetectorの枠が sx=135→227 と92px＝6.8モジュール
+        //   動いているのに、第1PQRのクロップ矩形は sx=48,sy=384 のまま10フレーム不動だった。
+        //   アンカー距離が 19〜159 とフレームごとに乱高下し、補正量も毎回別方向を指すのは、
+        //   ずれの向きが固定ではなく「時間とともに離れていく」ためで、
+        //   サブモジュール補正（±0.25）では原理的に追いつけない。
+        const newColorQ1RefreshStats = { tried: 0, ok: 0, failed: 0, maxDriftPx: 0, maxDriftModules: 0 };
+        function refreshFirstQrGeometryForNewColor(maxDim = 720) {
+            if (!video || !video.videoWidth || !video.videoHeight || !firstQR) return false;
+            if (typeof jsQR !== 'function' || !zxingCanvas || !zxingCtx) return false;
+            newColorQ1RefreshStats.tried++;
+            const vw = video.videoWidth;
+            const vh = video.videoHeight;
+            const scale = Math.min(1, maxDim / Math.max(vw, vh));
+            const tw = Math.max(1, Math.round(vw * scale));
+            const th = Math.max(1, Math.round(vh * scale));
+            let res = null;
+            try {
+                zxingCanvas.width = tw;
+                zxingCanvas.height = th;
+                zxingCtx.drawImage(video, 0, 0, tw, th);
+                res = jsQR(zxingCtx.getImageData(0, 0, tw, th).data, tw, th);
+            } catch (e) { res = null; }
+            if (!res || !res.location) { newColorQ1RefreshStats.failed++; return false; }
+            // ★取り違え防止: 本文が最初に読んだ第1QRと一致するときだけ採用する。
+            //   QRツインは2枚写っているので、第2PQRを拾って第1PQRの位置として
+            //   使ってしまうと、8.5モジュールずれた格子で色を読むことになる。
+            const prevText = (firstQR.text != null) ? String(firstQR.text) : String(firstQR.data ?? '');
+            if (res.data == null || String(res.data) !== prevText) { newColorQ1RefreshStats.failed++; return false; }
+            const inv = 1 / scale;
+            const loc = mapLocationToVideo(res.location, (x, y) => ({ x: x * inv, y: y * inv }));
+            if (!loc || !loc.topLeftCorner) { newColorQ1RefreshStats.failed++; return false; }
+            const old = firstQR.location && firstQR.location.topLeftCorner;
+            if (old) {
+                // ★同一データツイン（2枚が同じ本文）では本文一致だけでは第2PQRを弾けない。
+                //   第2PQRは第1PQRから 8.5モジュール斜めにずれた位置にあるので、
+                //   そこへ飛んだ候補は取り違えとして捨てる。
+                const modPx = Math.hypot(loc.topRightCorner.x - loc.topLeftCorner.x,
+                    loc.topRightCorner.y - loc.topLeftCorner.y) / Math.max(1, (firstQR.versionNumber || 1) * 4 + 17);
+                if (modPx > 0) {
+                    const dx = loc.topLeftCorner.x - old.x;
+                    const dy = loc.topLeftCorner.y - old.y;
+                    const shift = NEW_COLOR_SHIFT_MODULES * modPx;
+                    if (Math.hypot(dx - shift, dy - shift) < 2 * modPx
+                        || Math.hypot(dx + shift, dy + shift) < 2 * modPx) {
+                        newColorQ1RefreshStats.failed++;
+                        return false;
+                    }
+                }
+                const drift = Math.hypot(loc.topLeftCorner.x - old.x, loc.topLeftCorner.y - old.y);
+                const mod = Math.hypot(loc.topRightCorner.x - loc.topLeftCorner.x,
+                    loc.topRightCorner.y - loc.topLeftCorner.y) / Math.max(1, (firstQR.versionNumber || 1) * 4 + 17);
+                newColorQ1RefreshStats.maxDriftPx = Math.max(newColorQ1RefreshStats.maxDriftPx, drift);
+                if (mod > 0) {
+                    newColorQ1RefreshStats.maxDriftModules =
+                        Math.max(newColorQ1RefreshStats.maxDriftModules, drift / mod);
+                }
+            }
+            firstQR.location = loc;
+            firstQR.points = [loc.topLeftCorner, loc.topRightCorner, loc.bottomRightCorner, loc.bottomLeftCorner];
+            newColorQ1RefreshStats.ok++;
+            return true;
         }
 
         function capturePendingAppEncFrame() {
@@ -11099,7 +11174,15 @@
                         if (fullScanFrameIdx % 3 === 0) heavyScales.push(960);
                         else if (fullScanFrameIdx % 3 === 1) heavyScales.push(720);
                         if (maxDim > 0 && fullScanFrameIdx % 9 === 5) heavyScales.push(maxDim);
-                        const q2Stage3Profile = buildQ2ProfileForStage3();
+                        let q2Stage3Profile = buildQ2ProfileForStage3();
+                        // ★第1PQRも色を持つ構成（4色＋4色 など）は、第1QRの位置が古いと
+                        //   その格子で色を読むことになる。毎フレーム取り直してから組み直す。
+                        if (q2Stage3Profile && q2Stage3Profile.kind === 'newcolor'
+                            && newColorNeedsPqr1Separation(q2Stage3Profile.newColorMgmtInfo)) {
+                            if (refreshFirstQrGeometryForNewColor(720)) {
+                                q2Stage3Profile = buildQ2ProfileForStage3();
+                            }
+                        }
                         // newColor(3/4領域): 全画面カラー分類は高コストで成功実績ゼロのまま
                         // （実測ログでも全fail、成功はすべて F0/F0.5/F1 クロップ入力の
                         // matrix-located）。位置喪失時の保険として 1/6 フレームまで間引き、
