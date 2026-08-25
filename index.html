@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader59</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1194,10 +1194,6 @@
         //   白が 77/81/107 と明暗が逆転し、曖昧セルが 294/841（35%）まで悪化して全領域失敗していた。
         //   60 では通してしまうので、実測の谷間にあたる 150 まで上げる。
         const NEW_COLOR_CALIB_MIN_ANCHOR_DIST = 150;        // 黒白アンカー間の最小距離（未満はマッピング不良とみなす）
-        // ★これを下回る格子は「シンボルに乗っていない」。分類しても必ず失敗するので、
-        //   その画像では色分類自体を打ち切る。実測: 格子が合った第2PQR=294（復号成功）/
-        //   荒い第2PQR=146（失敗）/ 乗っていない第1PQR=1〜48。
-        const NEW_COLOR_GRID_MIN_ANCHOR_DIST = 60;
         // ★Ver3.1：実測ログ（dim=29）では、復号に成功した候補の曖昧セル数は必要領域平均で 0.5〜9、
         //   失敗した候補は 13〜35 と明確に分かれていた。従来の 0.12（=100セル）ではほぼ全候補が
         //   「即復号」に入り、位置検出順のまま悪い候補から総当たりしていた（実測: 本命が5番目）。
@@ -2185,13 +2181,12 @@
                         `  #${idx + 1} loc=${cp.locationIndex}${cp.targetPqrNo ? ' pqr=' + cp.targetPqrNo : ''}${cp.imgW ? ' img=' + cp.imgW + 'x' + cp.imgH : ''}${cp.seedFallback ? ' seed=1' : (cp.seedFromFinders ? ' seed=fp' : '')} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
                         `sample=${cp.supersampleScale ? cp.supersampleScale + 'x(' + fmtNum(cp.moduleSize) + '->' + fmtNum(cp.effectiveModuleSize) + 'px)' : 'native'} ` +
                         `alignFixed=${cp.alignFixed ? 1 : 0} alignD=${cp.alignD !== null && cp.alignD !== undefined ? fmtNum(cp.alignD) : '-'} ` +
-                        (cp.gridFit ? `grid=${Math.round(cp.gridFit.base)}` +
-                            (cp.gridFit.searched ? `>${Math.round(cp.gridFit.dist)}@${cp.gridFit.dx},${cp.gridFit.dy}` : '') +
-                            // ★採用した格子の黒白アンカー実測値。正しい格子なら黒は最暗・白は最明に寄る。
-                            //   もう一方のシンボルの格子に乗ると両方とも中間調になるので、ここで見分けられる。
-                            ((cp.gridFit.dx || cp.gridFit.dy) && cp.gridFit.dk && cp.gridFit.lt
-                                ? `(黒${cp.gridFit.dk.map(Math.round).join('/')} 白${cp.gridFit.lt.map(Math.round).join('/')})` : '') +
-                            (cp.gridRejected ? '(棄却)' : '') + ' ' : '') +
+                        // ★黒白アンカーの実測値（診断用。分類の可否には使っていない）。
+                        //   黒白のファインダーが素で写る構成では大きく開き、
+                        //   機能パターンまで色が乗る構成では開かない。構成ごとに意味が違う。
+                        (cp.gridFit && cp.gridFit.dk && cp.gridFit.lt
+                            ? `anc=${Math.round(cp.gridFit.dist)}(黒${cp.gridFit.dk.map(Math.round).join('/')}`
+                              + ` 白${cp.gridFit.lt.map(Math.round).join('/')}) ` : '') +
                         `amb=${s.ambiguousTotal || 0}/${s.totalCells || '-'}(${fmtNum((s.ambiguousPct || 0) * 100)}%) ` +
                         `minMargin=${s.minMargin !== null && s.minMargin !== undefined ? fmtNum(s.minMargin) : '-'} avgMargin=${s.avgMargin !== null && s.avgMargin !== undefined ? fmtNum(s.avgMargin) : '-'} ` +
                         `thrMargin=${s.threshold ? s.threshold.margin : '-'}${s.threshold && s.threshold.rel !== undefined ? '/rel=' + s.threshold.rel : ''} ${regionText} confusion=${confusion}`
@@ -9389,57 +9384,28 @@
             return { dist: Math.hypot(lt[0] - dk[0], lt[1] - dk[1], lt[2] - dk[2]), dk, lt };
         }
 
-        // ★サブモジュールのずれを、上の物差しを最大化する向きに直す。
-        //   第2PQRは実画像のファインダーを探して格子を組む（fpRank/alignFixed が付く）ため
-        //   ずれないが、第1PQRは第1QRの location から組むしかなく、そこがずれると
-        //   誰も気づけないまま彩度だけで決まるプレーンが全滅する。
-        function fitNewColorGridOffset(src, width, height, locationInfo, n, radius) {
-            const m0 = measureNewColorAnchorSeparation(src, width, height, locationInfo, n, radius, 0, 0);
-            const base = m0.dist;
-            const out = { dx: 0, dy: 0, dist: base, base, searched: 0, dk: m0.dk, lt: m0.lt };
-            // ★アンカーが十分離れていても、さらに離れる向きがあれば必ずそちらが正しい。
-            //   合成実測: 0.25モジュールずれは base=229 と一見良好だが曖昧セルは 344/841。
-            //   補正すると 5/841 まで落ちるので、良好に見える回も細かく詰める。
-            // ★±0.5は探さない。QRツインの2枚は 8.5モジュール（＝半モジュール）ずれて刷られるので、
-            //   ちょうど半モジュール動かすと「もう一方のシンボルの格子」に乗ってしまう。
-            //   そこでも機能パターンが部分的に噛み合うため、分離度だけ見ると偽の極大になる。
-            //   実測（4色×4色, 試行#3）: @0.5,-0.5 で dist=174 まで上がったのに、
-            //   較正結果は bla:159/72/47 / red:42/28/24 と黒と赤が入れ替わり、
-            //   曖昧セルは 573/1369(41.9%) へ悪化していた。
-            const STEPS = [0, -0.25, 0.25, -0.125, 0.125];
-            for (const dy of STEPS) {
-                for (const dx of STEPS) {
-                    if (dx === 0 && dy === 0) continue;
-                    out.searched++;
-                    const m = measureNewColorAnchorSeparation(src, width, height, locationInfo, n, radius, dx, dy);
-                    if (m.dist > out.dist) {
-                        out.dist = m.dist;
-                        out.dx = dx;
-                        out.dy = dy;
-                        out.dk = m.dk;
-                        out.lt = m.lt;
-                    }
-                }
-            }
-            return out;
-        }
-
         function sampleNewColorDisplayStatesFromLocation(src, width, height, locationInfo, decoder, colorProbe = null) {
             if (!src || !locationInfo || !locationInfo.mappingFunction || !decoder || !decoder.candidates) return null;
             const n = locationInfo.dimension || 0;
             if (n < 21 || ((n - 17) % 4) !== 0) return null;
             const moduleSize = Math.max(1, locationInfo.moduleSize || 1);
             const radius = Math.max(1, Math.round(moduleSize * 0.16));
-            // ★格子の自己検査とサブモジュール補正。合わない格子で分類しても
-            //   必ず失敗するうえ、1試行あたり900回以上のjsQR再試行を空回りさせる。
-            const gridFit = fitNewColorGridOffset(src, width, height, locationInfo, n, radius);
+            // ★黒白アンカーの分離度は「記録するだけ」。分類の可否には使わない。
+            //   これを門番にしていた版は、カラー4色の単一QR（構造1001）まで
+            //   「格子がシンボルに乗っていない」として捨ててしまい、
+            //   8/20版では読めていた図版が読めなくなった（実測: 1試行で約90フレーム棄却）。
+            //   分離度が健全な値を取るのは黒白のファインダーが素で写る構成だけで
+            //   （実測: ツインの第2PQR=289）、カラー4色では良好なフレームでも 61〜71 にしかならない。
+            //   構成ごとに意味の違う量をしきい値で切ってはいけない。
+            //   同じ理由で、この量を最大化する向きへ格子を動かす補正もやめる。
+            //   ずらすと「もう一方のシンボルの格子」など偽の極大へ吸い込まれ、
+            //   実測では黒と赤が入れ替わって曖昧セルが41.9%まで悪化していた。
+            const gridFit = colorProbe
+                ? measureNewColorAnchorSeparation(src, width, height, locationInfo, n, radius, 0, 0)
+                : null;
             if (colorProbe) colorProbe.gridFit = gridFit;
-            if (gridFit.dist < NEW_COLOR_GRID_MIN_ANCHOR_DIST) {
-                if (colorProbe) colorProbe.gridRejected = true;
-                return null;
-            }
-            const gridOffX = gridFit.dx;
-            const gridOffY = gridFit.dy;
+            const gridOffX = 0;
+            const gridOffY = 0;
             const probeOffsets = [
                 { dx: 0, dy: 0, weight: 3 },
                 { dx: -0.18, dy: 0, weight: 1 },
@@ -10116,19 +10082,7 @@
                     colorProbe.supersampleCrop = supersampled.crop;
                 }
                 const sampledStates = sampleNewColorDisplayStatesFromLocation(sampleSrc, sampleWidth, sampleHeight, sampleLocationInfo, decoder, colorProbe);
-                if (!sampledStates) {
-                    // ★格子がシンボルに乗っていないと判定した回もログに残す。
-                    //   黙って continue すると、何も試していないのに痕跡が消える。
-                    if (colorProbe && colorProbe.gridRejected) {
-                        const f = colorProbe.gridFit || {};
-                        recordNewColorNoCandidate('pqr' + (colorProbe.targetPqrNo || '?')
-                            + ' ' + (colorProbe.imgW || '?') + 'x' + (colorProbe.imgH || '?')
-                            + ' 格子がシンボルに乗っていない(アンカー距離 ' + Math.round(f.base || 0)
-                            + (f.searched ? '→補正しても ' + Math.round(f.dist || 0) : '') + ')'
-                            + (colorProbe.seedFromFinders ? ' 種=fp' : ''));
-                    }
-                    continue;
-                }
+                if (!sampledStates) continue;
                 const cells = colorProbe._cells || null;
                 const altStates = colorProbe._altStates || null;
                 const centroids = colorProbe._centroids || null;
