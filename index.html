@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader61</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -9323,7 +9323,17 @@
                 singleLocate: false,
                 expectedVersionNumber: q1Data.version || q1Data.versionNumber || null,
                 expectedDimension: q1Data.version ? (17 + 4 * q1Data.version) : null,
-                expectedDimensionTolerance: 0,
+                // ★許容0は「ファインダー3つを正しく見つけた候補」まで捨てる。
+                //   jsQR は3つのファインダー間隔とモジュール寸法から寸法を推定し、
+                //   期待値との差が許容を超えると findAlignmentPattern が null を返す。
+                //   呼び出し側は if (alignment) でしか候補を積まないため、
+                //   推定寸法が1モジュールずれただけで候補ごと消える（jsQR.js:11724 / 11645）。
+                //   推定はモジュール寸法の実測からの割り算なので、隣にもう1枚重なるツインでは
+                //   容易に±1動く。実測（4色×4色 12試行）では第1PQRの候補が常にゼロになり、
+                //   四隅から作った保険の格子でしか色分類できていなかった。
+                //   同ファイルの他の2箇所（3521 / 4657）も jsQR の既定値も 4 で、
+                //   第1QRの復号（Stage1）はそもそもこのフィルタを掛けていない。
+                expectedDimensionTolerance: 4,
                 debugProbe: true,
                 probeCollector: locateProbeCollector,
                 _probeMapPoint: localToVideoPoint || ((x, y) => ({ x, y })),
