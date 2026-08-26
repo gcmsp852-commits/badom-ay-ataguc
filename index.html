@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader63</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -3428,7 +3428,8 @@
                                 formatInfo: res.formatInfo
                             },
                             codewords: res.correctedCodewords || res.codewords || null,
-                            location: res.location,
+                            // ★points と同じ写像を通す（生のまま返すと復号に使ったクロップの原点ぶんずれる）
+                            location: mapLocationPoints(res.location, mapPt),
                             points: pts,
                             center: computeCenterFromPoints(pts)
                         };
@@ -3490,7 +3491,10 @@
                     codewords: res.codewords,
                     dataBytes: res.dataBytes,
                     versionNumber: res.versionNumber,
-                    location: res.location,
+                    // ★points と同じ写像を通す。ここを生のまま返すと、この結果を
+                    //   第1QRとして保存したあと Stage3 の色分離が使う格子が
+                    //   「復号に使ったクロップの原点」ぶんずれる（実測で一致を確認）。
+                    location: mapLocationPoints(res.location, mapPt),
                     points: pts,
                     center: computeCenterFromPoints(pts)
                 };
@@ -3842,7 +3846,8 @@
                             codewords: _comb.codewords,
                             dataBytes: _comb.dataBytes,
                             versionNumber: _comb.versionNumber,
-                            location: _comb.location,
+                            // ★_pts と同じ倍率を location にも掛ける（上と同じ理由）
+                            location: mapLocationPoints(_comb.location, (x, y) => ({ x: x * _tinv, y: y * _tinv })),
                             points: _pts,
                             center: computeCenterFromPoints(_pts)
                         };
@@ -6629,23 +6634,30 @@
             };
         }
 
-        function mapQrResultLocation(qr, mapPoint) {
-            if (!qr || !qr.location || typeof mapPoint !== 'function') return qr;
+        // ★location の全点を別の座標系へ写す。
+        //   jsQR が返す location は「復号に使った画像の座標系」なので、
+        //   復号結果として保存する前に必ず元動画の座標系へ写しておく必要がある。
+        //   （points だけ写して location を生のまま持つと、Stage3 が
+        //     それを動画座標だと思ってもう一度写し、クロップ原点ぶんずれる）
+        function mapLocationPoints(location, mapPoint) {
+            if (!location || typeof mapPoint !== 'function') return location;
             const movePoint = (point) => point ? mapPoint(point.x, point.y) : point;
             return {
-                ...qr,
-                location: {
-                    ...qr.location,
-                    topLeftCorner: movePoint(qr.location.topLeftCorner),
-                    topRightCorner: movePoint(qr.location.topRightCorner),
-                    bottomRightCorner: movePoint(qr.location.bottomRightCorner),
-                    bottomLeftCorner: movePoint(qr.location.bottomLeftCorner),
-                    topLeftFinderPattern: movePoint(qr.location.topLeftFinderPattern),
-                    topRightFinderPattern: movePoint(qr.location.topRightFinderPattern),
-                    bottomLeftFinderPattern: movePoint(qr.location.bottomLeftFinderPattern),
-                    bottomRightAlignmentPattern: movePoint(qr.location.bottomRightAlignmentPattern)
-                }
+                ...location,
+                topLeftCorner: movePoint(location.topLeftCorner),
+                topRightCorner: movePoint(location.topRightCorner),
+                bottomRightCorner: movePoint(location.bottomRightCorner),
+                bottomLeftCorner: movePoint(location.bottomLeftCorner),
+                topLeftFinderPattern: movePoint(location.topLeftFinderPattern),
+                topRightFinderPattern: movePoint(location.topRightFinderPattern),
+                bottomLeftFinderPattern: movePoint(location.bottomLeftFinderPattern),
+                bottomRightAlignmentPattern: movePoint(location.bottomRightAlignmentPattern)
             };
+        }
+
+        function mapQrResultLocation(qr, mapPoint) {
+            if (!qr || !qr.location || typeof mapPoint !== 'function') return qr;
+            return { ...qr, location: mapLocationPoints(qr.location, mapPoint) };
         }
 
         function transformQrDataLocation(qr, mapPoint) {
@@ -9323,17 +9335,7 @@
                 singleLocate: false,
                 expectedVersionNumber: q1Data.version || q1Data.versionNumber || null,
                 expectedDimension: q1Data.version ? (17 + 4 * q1Data.version) : null,
-                // ★許容0は「ファインダー3つを正しく見つけた候補」まで捨てる。
-                //   jsQR は3つのファインダー間隔とモジュール寸法から寸法を推定し、
-                //   期待値との差が許容を超えると findAlignmentPattern が null を返す。
-                //   呼び出し側は if (alignment) でしか候補を積まないため、
-                //   推定寸法が1モジュールずれただけで候補ごと消える（jsQR.js:11724 / 11645）。
-                //   推定はモジュール寸法の実測からの割り算なので、隣にもう1枚重なるツインでは
-                //   容易に±1動く。実測（4色×4色 12試行）では第1PQRの候補が常にゼロになり、
-                //   四隅から作った保険の格子でしか色分類できていなかった。
-                //   同ファイルの他の2箇所（3521 / 4657）も jsQR の既定値も 4 で、
-                //   第1QRの復号（Stage1）はそもそもこのフィルタを掛けていない。
-                expectedDimensionTolerance: 4,
+                expectedDimensionTolerance: 0,
                 debugProbe: true,
                 probeCollector: locateProbeCollector,
                 _probeMapPoint: localToVideoPoint || ((x, y) => ({ x, y })),
